@@ -1,0 +1,40 @@
+{
+  "_README": [
+    "Predefined contact points for hand-object and hand-hand optimization.",
+    "MANO meshes have 778 vertices (mano_vid in 0..777) — same topology for left and right.",
+    "obj_vid is an index into the vertex array of the mesh at club_mesh_path (0 .. N-1).",
+    "Use utils/vis_predefined_contacts.py to look up which vertex sits where on the mesh.",
+    "Edit this file while the viewer is running — points refresh on save.",
+    "",
+    "hand_attract_tips: MANO vertex ids on each hand that the SportGS force-closure",
+    "stage attracts toward the nearest club vertex (via knn_points + FCLoss).",
+    "Loaded by model/SportGS/utils/contact_config.py and used in render_mesh.force_closure."
+  ],
+  "club_mesh_path": "/data2/fubingshuai/golf/data/club-assets/35_wood_8_01/20260421142122_meter.stl",
+  "hand_attract_tips": {
+    "right": [
+      768,
+      342,
+      454,
+      565,
+      683,
+      77
+    ],
+    "left": [
+      768,
+      342,
+      454,
+      565,
+      683,
+      77
+    ]
+  },
+  "hand_hand_contacts": [
+    {
+      "name": "auto_R_L_0",
+      "right_mano_vid": 26,
+      "left_mano_vid": 721,
+      "weight": 1.0
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# @package _global_
+
+dataset_name: 'golf'
+
+
+dataset:
+  name: 'golf'
+  root_dir: "/home/pt/fbs/dataset/mrc-net-6d-pose/demo_video/DA5298464/images/Video_0/"
+  pose_path : "/home/pt/fbs/data_fixed_opt_contact.npy"
+  refine: False
+  finetune: True
+  backbone: 'CLIP'
+  noise: False
+  anno_name: all
+  train_sample_rate : 1
+  val_sample_rate : 1
+  test_sample_rate : 1
+  predict_sample_rate : 1
+  split_train: 'DA5298464'
+  split_test: 'DA5298464'
+  speedup: True
+  ego_image_scale: 0.3
+
+  # until_sam2: 30000
+  # lambda_sam2: 1.
+
+  _SUBJECTS : [
+      's01',
+  ]
+  _YCB_CLASSES: [
+                'golf',
+  ]
+
+  img_hw:
+    - 1000
+    - 1000
+
+white_background: false
+data_device: cuda

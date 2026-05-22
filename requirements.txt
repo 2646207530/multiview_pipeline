@@ -1,0 +1,2 @@
+# 新项目额外需要的依赖, 在 golf-hand-object 现有依赖之上
+gradio>=4.0

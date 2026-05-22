@@ -1,0 +1,45 @@
+# @package _global_
+
+dataset_name: 'arctic_box'
+
+
+dataset:
+  name: 'arctic'
+  root_dir: "/mnt/sda1/lxy/dataset/ARCTIC_demo/"
+  refine: False
+  finetune: True
+  backbone: 'CLIP'
+  noise: False
+  anno_name: all
+  train_sample_rate : 1
+  val_sample_rate : 1
+  test_sample_rate : 1
+  predict_sample_rate : 1
+  split_train: 's01_box_grab_01_1'
+  split_test: 's01_box_grab_01_8'
+  speedup: True
+  ego_image_scale: 0.3
+
+  # until_sam2: 30000
+  # lambda_sam2: 1.
+
+  _SUBJECTS : [
+      's01',
+  ]
+  _YCB_CLASSES: [
+                'box',
+#                'capsulemachine',
+#                'espressomachine',
+#                'ketchup',
+#                'laptop',
+#                'microwave',
+#                'mixer',
+#                'waffleiron',
+  ]
+
+  img_hw:
+    - 1000
+    - 1000
+
+white_background: false
+data_device: cuda

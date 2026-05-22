@@ -1,0 +1,108 @@
+# ===== 模型权重 / 大文件 =====
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.onnx
+*.trt
+*.engine
+*.bin
+*.safetensors
+*.tar
+*.zip
+*.pkl
+# MANO 权重需要 SMPL license, 不要推到公开 GitHub.
+# 想要分享的话, 自己评估是否在仓库里保留它们.
+# !MANO/*.pkl
+
+# ===== 数据文件 =====
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.mp4
+*.avi
+*.mov
+*.obj
+*.stl
+*.ply
+!assets/demo_golfclub.obj
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# ===== Runtime / pipeline 产物 (capture_dir 下, 通常不在仓库里, 但 ignore 一下保险) =====
+.pipeline/
+.undistorted/
+.tmp_images/
+.gradio_tmp/
+trajectory_output/
+
+# ===== 备份的 .git =====
+.git_bak/
+.git_old/
+
+# ===== 无关项目 (不需要推送) =====
+2d-gaussian-splatting/
+FollowMyHold/
+FoundationPoseROS2/
+GeneOH-Diffusion/
+ManipTrans/
+smplx/
+temp_coco_regressor/
+
+out/
+test/
+
+# ===== model/ 中不需要的子项目 =====
+model/weight/
+model/Hand_Estimation/exp/
+model/Hand_Estimation/assets/mano_v1_2/
+model/Hand_Estimation/assets/mano_v1_2.zip
+model/Hand_Estimation/mano/
+model/Hand_Estimation/mano_data/
+model/Hand_Estimation/dinov3_*.pth
+model/sam2_ckpts/
+
+# ===== model/ 中的权重目录 =====
+model/hamer/_DATA/
+model/hamer/example_data/
+model/hamer/test_image/
+model/hamer/test_hand_mesh.jpg
+model/yolo/yolov7/paper/
+model/hamer/traced_model.pt
+model/rootnet/KeypointFusion/checkpoint/
+model/rootnet/SAR-*.pth
+model/config/checkpoints/
+model/yolo/yolov7/yolotrtmodel/
+model/yolo/yolov7/traced_model.pt
+model/yolo/yolov7/TensorRT-For-YOLO-Series-cuda-python/
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Cursor / Claude =====
+.cursor/
+.claude/
+
+# ===== 日志 =====
+*.log
+runs/
+events.out.tfevents.*
