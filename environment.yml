@@ -1,15 +1,19 @@
 # =============================================================================
 # Golf Multi-View Pipeline (wizard) 的 conda 环境.
 #
-# v1 范围: raw 抽帧 → 去畸变 → YOLO 检测 → HaMER 伪标 → HE 自监督 finetune →
-#         HE 多视角推理 → way_vis 可视化.
-# 不含: SAM2 交互式分割, SportGS 接触/力闭合优化 (那些重型依赖见 golf-hand-object).
+# 这里只装 conda 才能装好的: python, PyTorch + CUDA, pytorch3d.
+# 其余 pip 包统一在 requirements.txt 里维护, 这里通过 `-r requirements.txt`
+# 一并装上.
 #
 # 用法:
 #   conda env create -f environment.yml
 #   conda activate golf_pipeline
 #
 # PyTorch 2.1 + CUDA 11.8 (跟 HaMER / Hand_Estimation 同栈).
+#
+# 注意: torchgeometry 在新版 PyTorch 下有个 bool tensor bug
+# (`1 - mask`), 项目内通过 lib/utils/_torchgeometry_patch.py 运行时 monkey-patch
+# 修复, 不需要手动改 site-packages.
 # =============================================================================
 
 name: golf_pipeline
@@ -17,76 +21,22 @@ name: golf_pipeline
 channels:
   - pytorch
   - nvidia
+  - pytorch3d
   - conda-forge
   - defaults
 
 dependencies:
   - python=3.10
   - pip
-  # chumpy 在 --no-build-isolation 下 build 时, 需要 setuptools / wheel 在当前 env
-  - setuptools
+  # chumpy build 时 (在 --no-build-isolation 下) 要用当前 env 的 setuptools/wheel.
+  # setuptools 必须 <70: 81+ 删了 pkg_resources, 而 PyTorch 2.1.2 的 cpp_extension
+  # 还在 import pkg_resources, 否则 pytorch3d 源码编译会 fail.
+  - setuptools<70
   - wheel
 
-  # ── PyTorch + CUDA ────────────────────────────────────────────────────
+  # ── PyTorch + CUDA (conda 必装, pip 装 pytorch3d 太折腾) ──────────────
   - pytorch=2.1.2
   - torchvision=0.16.2
   - torchaudio=2.1.2
   - pytorch-cuda=11.8
-
-  # ── 科学计算 / 图像 ──────────────────────────────────────────────────
-  # chumpy 旧栈兼容性需要 numpy<1.24
-  - numpy>=1.21.0,<1.24.0
-  - scipy>=1.7.0
-  - pandas>=1.3.0
-  - pillow>=9.0
-  - scikit-image>=0.19
-  - matplotlib>=3.5
-
-  # ── 工具链 ───────────────────────────────────────────────────────────
-  - tqdm>=4.62
-  - pyyaml>=6.0
-  - requests>=2.28
-  - protobuf>=3.20,<5
-  - psutil
-  - ipython
-
-  - pip:
-    # 关 build isolation, 让 chumpy 这种老包能用当前 env 里的 setuptools/wheel build
-    # (不然 chumpy setup.py 里 `import pip` 会在隔离的 build env 里 ModuleNotFound).
-    # 对走 prebuilt wheel 的包是 no-op.
-    - --no-build-isolation
-
-    # ── 3D / Mesh / IO ───────────────────────────────────────────────
-    - opencv-python>=4.5.0
-    - open3d>=0.17.0
-    - trimesh>=3.21
-    - pyrender>=0.1.45
-    - PyOpenGL==3.1.0
-
-    # ── MANO / SMPL ──────────────────────────────────────────────────
-    - smplx==0.1.28
-    # chumpy 从 github 源装, 配合上面的 --no-build-isolation 避开 build env 没 pip 的坑
-    - chumpy @ git+https://github.com/mattloper/chumpy
-
-    # ── HaMER 栈 ─────────────────────────────────────────────────────
-    - pytorch-lightning>=2.0
-    - yacs>=0.1.8
-    - timm>=0.9.0
-    - einops>=0.6
-    - hydra-core>=1.3
-    - omegaconf>=2.3
-    - xtcocotools
-
-    # ── 推理优化 (HaMER 可选 ONNX 加速) ──────────────────────────────
-    - onnxruntime-gpu>=1.15
-
-    # ── Web UI + 权重下载 ────────────────────────────────────────────
-    - gradio>=4.0
-    - huggingface_hub>=0.20
-
-    # ── 训练日志 (step4 finetune 用) ─────────────────────────────────
-    - tensorboard>=2.10
-
-    # ── 杂项 ─────────────────────────────────────────────────────────
-    - gdown
-    - rich
+  - pytorch3d

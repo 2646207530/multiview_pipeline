@@ -1,37 +1,51 @@
 # Golf Multi-View Pipeline (wizard) — pip 依赖.
 #
-# 这份 requirements 假设你已经独立装好了:
-#   - Python 3.10
-#   - PyTorch 2.1.x + CUDA 11.8 (torch / torchvision / torchaudio)
-#   - 系统级 OpenGL (libgl, libglu, libegl) — pyrender 需要
+# 这是项目所有 pip 包的单一来源 (single source of truth).
+# environment.yml 通过 `-r requirements.txt` 引用本文件.
 #
-# 没有上述前提的话, 用 conda env create -f environment.yml 一站式装好.
-#
-# 装法:
+# 直接用本文件装 (假设 Python 3.10 + PyTorch 2.1.2 + CUDA 11.8 已就位):
 #   pip install --no-build-isolation -r requirements.txt
 #
-# 必须加 --no-build-isolation, 否则 chumpy 的 setup.py 会因为
-# build subprocess 里没有 pip 模块而 fail. 见下面 chumpy 那行注释.
+# 必须加 --no-build-isolation, 否则 chumpy 的 setup.py 会因为 build subprocess
+# 里没有 pip 模块而 fail.
+#
+# 注意: pytorch3d 单独装, 不在 requirements 里 (PyPI 上没有匹配 wheel).
+# 推荐用 Facebook 的预编译 wheel (py310 + cu118 + pyt212):
+#   pip install --no-index --no-cache-dir pytorch3d \
+#     -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu118_pyt212/download.html
+# 或从源码装 (慢, 需要 CUDA toolkit, ~10-30min):
+#   pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 
 # ── 科学计算 / 图像 ─────────────────────────────────────────────────
 numpy>=1.21.0,<1.24.0
 scipy>=1.7.0
 pandas>=1.3.0
+scikit-learn>=1.0
 Pillow>=9.0
 scikit-image>=0.19
 matplotlib>=3.5
+seaborn>=0.12
 opencv-python>=4.5.0
 
-# ── 3D / Mesh ──────────────────────────────────────────────────────
+# ── 3D / Mesh / IO ─────────────────────────────────────────────────
 open3d>=0.17.0
 trimesh>=3.21
 pyrender>=0.1.45
 PyOpenGL==3.1.0
+imageio>=2.25
+plyfile
 
 # ── MANO / SMPL ────────────────────────────────────────────────────
 smplx==0.1.28
-# chumpy 用 PyPI prebuilt wheel; git+ source build 会因 setup.py 里 import pip 而失败
-chumpy
+manopth @ git+https://github.com/hassony2/manopth.git
+manotorch @ git+https://github.com/lixiny/manotorch.git
+chumpy @ git+https://github.com/mattloper/chumpy.git
+
+
+# ── pytorch3d (依赖 fvcore / iopath, 必须先装) ─────────────────────
+# pytorch3d 不能直接 pip install, 见下方安装命令; fvcore / iopath 这里先列出.
+fvcore
+iopath
 
 # ── HaMER / Hand_Estimation 栈 ─────────────────────────────────────
 pytorch-lightning>=2.0
@@ -41,8 +55,20 @@ einops>=0.6
 hydra-core>=1.3
 omegaconf>=2.3
 xtcocotools
+pycocotools
+# transformers: HaMER / Hand_Estimation 的 metro_transformer 从老的导入路径拿
+# GenerationMixin / BertConfig 等; 新版 (>=4.50) 改了结构会 ImportError. 钉到 4.39.
+transformers==4.39.3
+transforms3d
+torchgeometry
+webdataset
+easydict
+tensorboardX
+line-profiler
+termcolor
 
 # ── 推理优化 (HaMER 可选 ONNX 加速) ────────────────────────────────
+onnx
 onnxruntime-gpu>=1.15
 
 # ── Web UI + 权重下载 ──────────────────────────────────────────────
@@ -60,3 +86,4 @@ psutil
 ipython
 gdown
 rich
+gitpython

@@ -1,3 +1,5 @@
+from ..utils import _torchgeometry_patch  # noqa: F401  (运行时 monkey-patch torchgeometry)
+
 # from .heads.mvp_head import MVPHead
 # from .heads.petr_head import PETRHead
 # from .heads.petr_FTL_head import PETRHead_FTL

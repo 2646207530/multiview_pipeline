@@ -28,6 +28,10 @@ cd pipeline
 # 2) 装环境 (见下文「环境配置」)
 conda env create -f environment.yml
 conda activate golf_pipeline
+pip install --no-build-isolation -r requirements.txt
+# 安pytorch3d
+pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+
 
 # 3) 拉权重 (见下文「权重 setup」)
 huggingface-cli login   # 粘 HF token
@@ -138,10 +142,12 @@ conda env create -f environment.yml
 conda activate golf_pipeline
 ```
 
-或者纯 pip (假设你已经有合适的 CUDA-enabled PyTorch):
+`environment.yml` 只装 conda 必装的 (python / pytorch / pytorch3d), 其余 pip 包从 `requirements.txt` 一并装上 (含 chumpy, 已加 `--no-build-isolation` 绕开它的 `import pip` 坑).
+
+或者纯 pip (假设 PyTorch + CUDA + pytorch3d 已经独立装好):
 
 ```bash
-pip install -r requirements.txt
+pip install --no-build-isolation -r requirements.txt
 ```
 
 `environment.yml` 已经把 SportGS / SAM2 相关重型依赖砍掉 (v1 不含). 想要 SportGS / 接触优化, 见 `golf-hand-object` 仓库原始 environment.yml.
