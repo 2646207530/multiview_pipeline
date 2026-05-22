@@ -10,10 +10,20 @@ Wizard 风格: 7 个 Tab (Setup + 6 steps), 每个 Tab 一个 Run 按钮 + 状�
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
 from typing import Any, Dict
+
+# 避免共享机器上 /tmp/gradio 被别人创建后 PermissionDenied.
+# 优先用 GRADIO_TEMP_DIR / TMPDIR; 否则 fallback 到家目录下私有目录.
+# 必须在 `import gradio` 之前设, 不然 gradio 已经按 /tmp 初始化好了.
+_gradio_tmp = (os.environ.get("GRADIO_TEMP_DIR")
+                or os.environ.get("TMPDIR")
+                or str(Path.home() / ".gradio_tmp"))
+Path(_gradio_tmp).mkdir(parents=True, exist_ok=True)
+os.environ["GRADIO_TEMP_DIR"] = _gradio_tmp
 
 import gradio as gr
 

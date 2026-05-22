@@ -1,17 +1,22 @@
 # =============================================================================
-# 支持 run_hamer_to_npy.py 全流程，包括：
-#   --opt_range（Contact）与 --force_closure_range（力闭合）触发的 SportGS 子进程
-# =============================================================================
-# 1) conda env create -f environment.yml && conda activate hamer_env
-# 2) 在已配置 CUDA Toolkit + nvcc 的机器上安装 simple-knn（见文末）
+# Golf Multi-View Pipeline (wizard) 的 conda 环境.
+#
+# v1 范围: raw 抽帧 → 去畸变 → YOLO 检测 → HaMER 伪标 → HE 自监督 finetune →
+#         HE 多视角推理 → way_vis 可视化.
+# 不含: SAM2 交互式分割, SportGS 接触/力闭合优化 (那些重型依赖见 golf-hand-object).
+#
+# 用法:
+#   conda env create -f environment.yml
+#   conda activate golf_pipeline
+#
+# PyTorch 2.1 + CUDA 11.8 (跟 HaMER / Hand_Estimation 同栈).
 # =============================================================================
 
-name: hamer_env
+name: golf_pipeline
 
 channels:
   - pytorch
   - nvidia
-  - pytorch3d
   - conda-forge
   - defaults
 
@@ -19,84 +24,60 @@ dependencies:
   - python=3.10
   - pip
 
-  # PyTorch 2.1 + CUDA 11.8（与 conda pytorch3d 预编译包常见组合）
+  # ── PyTorch + CUDA ────────────────────────────────────────────────────
   - pytorch=2.1.2
   - torchvision=0.16.2
   - torchaudio=2.1.2
   - pytorch-cuda=11.8
-  - pytorch3d
 
-  # chumpy / 旧栈常需 numpy<1.24
+  # ── 科学计算 / 图像 ──────────────────────────────────────────────────
+  # chumpy 旧栈兼容性需要 numpy<1.24
   - numpy>=1.21.0,<1.24.0
   - scipy>=1.7.0
   - pandas>=1.3.0
-
   - pillow>=9.0
   - scikit-image>=0.19
+  - matplotlib>=3.5
 
+  # ── 工具链 ───────────────────────────────────────────────────────────
   - tqdm>=4.62
   - pyyaml>=6.0
   - requests>=2.28
-  - matplotlib>=3.5
-  - seaborn>=0.12
   - protobuf>=3.20,<5
-  - ipython
   - psutil
+  - ipython
 
   - pip:
+    # ── 3D / Mesh / IO ───────────────────────────────────────────────
     - opencv-python>=4.5.0
     - open3d>=0.17.0
     - trimesh>=3.21
     - pyrender>=0.1.45
     - PyOpenGL==3.1.0
 
+    # ── MANO / SMPL ──────────────────────────────────────────────────
     - smplx==0.1.28
     - chumpy @ git+https://github.com/mattloper/chumpy
 
-    # HaMER
+    # ── HaMER 栈 ─────────────────────────────────────────────────────
     - pytorch-lightning>=2.0
     - yacs>=0.1.8
     - timm>=0.9.0
     - einops>=0.6
-    - xtcocotools
-    - gdown
-    - rich
-    - onnxruntime-gpu>=1.15
-
-    # Hydra / SportGS
     - hydra-core>=1.3
     - omegaconf>=2.3
-    - hydra-submitit-launcher
-    - hydra-colorlog
-    - pyrootutils
-    - webdataset
-    - line-profiler
+    - xtcocotools
+
+    # ── 推理优化 (HaMER 可选 ONNX 加速) ──────────────────────────────
+    - onnxruntime-gpu>=1.15
+
+    # ── Web UI + 权重下载 ────────────────────────────────────────────
+    - gradio>=4.0
+    - huggingface_hub>=0.20
+
+    # ── 训练日志 (step4 finetune 用) ─────────────────────────────────
     - tensorboard>=2.10
-    - thop
 
-    # SportGS：train_contact / finetune_force_closure / render_mesh
-    - lpips
-    - kornia>=0.7.0
-    - torchmetrics>=1.0
-    - easydict
-    - pyiqa
-    - swanlab
-    - plyfile
-    - igl
-    - libyana @ git+https://github.com/hassony2/libyana.git
-
-# -----------------------------------------------------------------------------
-# 【必做】SportGS 高斯模块依赖 simple-knn（CUDA 扩展），需在激活环境后单独安装：
-#
-#   conda activate hamer_env
-#   pip install git+https://github.com/graphdeco-inria/simple-knn.git
-#
-# 若编译失败，请确认已安装与 pytorch-cuda=11.8 匹配的 CUDA Toolkit，且 nvcc 在 PATH 中。
-#
-# 自检：
-#   python -c "import torch; import pytorch3d; import simple_knn._C; print('ok')"
-# -----------------------------------------------------------------------------
-#
-# 若仅需手部 npy、不使用 --opt_range / --force_closure_range，可改用更轻环境：
-#   仅需 PyTorch 2.0 + 原 HaMER/YOLO 依赖即可，不必安装 pytorch3d / simple-knn / SportGS 相关 pip 包。
-# -----------------------------------------------------------------------------
+    # ── 杂项 ─────────────────────────────────────────────────────────
+    - gdown
+    - rich

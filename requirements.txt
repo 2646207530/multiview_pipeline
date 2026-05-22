@@ -1,2 +1,58 @@
-# 新项目额外需要的依赖, 在 golf-hand-object 现有依赖之上
+# Golf Multi-View Pipeline (wizard) — pip 依赖.
+#
+# 这份 requirements 假设你已经独立装好了:
+#   - Python 3.10
+#   - PyTorch 2.1.x + CUDA 11.8 (torch / torchvision / torchaudio)
+#   - 系统级 OpenGL (libgl, libglu, libegl) — pyrender 需要
+#
+# 没有上述前提的话, 用 conda env create -f environment.yml 一站式装好.
+#
+# 装法:
+#   pip install -r requirements.txt
+
+# ── 科学计算 / 图像 ─────────────────────────────────────────────────
+numpy>=1.21.0,<1.24.0
+scipy>=1.7.0
+pandas>=1.3.0
+Pillow>=9.0
+scikit-image>=0.19
+matplotlib>=3.5
+opencv-python>=4.5.0
+
+# ── 3D / Mesh ──────────────────────────────────────────────────────
+open3d>=0.17.0
+trimesh>=3.21
+pyrender>=0.1.45
+PyOpenGL==3.1.0
+
+# ── MANO / SMPL ────────────────────────────────────────────────────
+smplx==0.1.28
+chumpy @ git+https://github.com/mattloper/chumpy
+
+# ── HaMER / Hand_Estimation 栈 ─────────────────────────────────────
+pytorch-lightning>=2.0
+yacs>=0.1.8
+timm>=0.9.0
+einops>=0.6
+hydra-core>=1.3
+omegaconf>=2.3
+xtcocotools
+
+# ── 推理优化 (HaMER 可选 ONNX 加速) ────────────────────────────────
+onnxruntime-gpu>=1.15
+
+# ── Web UI + 权重下载 ──────────────────────────────────────────────
 gradio>=4.0
+huggingface_hub>=0.20
+
+# ── 训练日志 (step4 finetune 用) ───────────────────────────────────
+tensorboard>=2.10
+
+# ── 工具链 ─────────────────────────────────────────────────────────
+tqdm>=4.62
+pyyaml>=6.0
+requests>=2.28
+psutil
+ipython
+gdown
+rich
