@@ -8,7 +8,10 @@
 # 没有上述前提的话, 用 conda env create -f environment.yml 一站式装好.
 #
 # 装法:
-#   pip install -r requirements.txt
+#   pip install --no-build-isolation -r requirements.txt
+#
+# 必须加 --no-build-isolation, 否则 chumpy 的 setup.py 会因为
+# build subprocess 里没有 pip 模块而 fail. 见下面 chumpy 那行注释.
 
 # ── 科学计算 / 图像 ─────────────────────────────────────────────────
 numpy>=1.21.0,<1.24.0
@@ -27,7 +30,8 @@ PyOpenGL==3.1.0
 
 # ── MANO / SMPL ────────────────────────────────────────────────────
 smplx==0.1.28
-chumpy @ git+https://github.com/mattloper/chumpy
+# chumpy 用 PyPI prebuilt wheel; git+ source build 会因 setup.py 里 import pip 而失败
+chumpy
 
 # ── HaMER / Hand_Estimation 栈 ─────────────────────────────────────
 pytorch-lightning>=2.0

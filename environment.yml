@@ -23,6 +23,9 @@ channels:
 dependencies:
   - python=3.10
   - pip
+  # chumpy 在 --no-build-isolation 下 build 时, 需要 setuptools / wheel 在当前 env
+  - setuptools
+  - wheel
 
   # ── PyTorch + CUDA ────────────────────────────────────────────────────
   - pytorch=2.1.2
@@ -48,6 +51,11 @@ dependencies:
   - ipython
 
   - pip:
+    # 关 build isolation, 让 chumpy 这种老包能用当前 env 里的 setuptools/wheel build
+    # (不然 chumpy setup.py 里 `import pip` 会在隔离的 build env 里 ModuleNotFound).
+    # 对走 prebuilt wheel 的包是 no-op.
+    - --no-build-isolation
+
     # ── 3D / Mesh / IO ───────────────────────────────────────────────
     - opencv-python>=4.5.0
     - open3d>=0.17.0
@@ -57,6 +65,7 @@ dependencies:
 
     # ── MANO / SMPL ──────────────────────────────────────────────────
     - smplx==0.1.28
+    # chumpy 从 github 源装, 配合上面的 --no-build-isolation 避开 build env 没 pip 的坑
     - chumpy @ git+https://github.com/mattloper/chumpy
 
     # ── HaMER 栈 ─────────────────────────────────────────────────────
