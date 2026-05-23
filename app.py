@@ -227,14 +227,15 @@ def cb_detect(force: bool, progress=gr.Progress(track_tqdm=False)):
                 None, None, traceback.format_exc())
 
 
-def cb_pseudo(force: bool, make_video: bool,
+def cb_pseudo(backend: str, force: bool, make_video: bool,
               progress=gr.Progress(track_tqdm=False)):
     ws = _ws_or_raise()
     def _p(frac, msg):
         progress(frac, desc=msg)
     try:
         info = step3_pseudo_label.run(ws, progress=_p, force=force,
-                                       make_video=make_video)
+                                       make_video=make_video,
+                                       backend=backend)
         ctx.state = PipelineState.load(ws)
         return info, _status_md(), info.get("pseudo_overlay_mp4"), ""
     except Exception as e:
@@ -351,16 +352,20 @@ def build_ui() -> gr.Blocks:
                               [out_det, status_box,
                                preview_det0, preview_det1, log_det])
 
-            # ── Step 3: HaMER Pseudo Label ─────────────────────────
-            with gr.Tab("3. HaMER Pseudo Label"):
-                ps_force = gr.Checkbox(label="Force re-run HaMER (覆盖已存在的 npz)")
+            # ── Step 3: Pseudo Label (HaMER / WiLoR) ──────────────
+            with gr.Tab("3. Pseudo Label"):
+                ps_backend = gr.Radio(
+                    choices=["hamer", "wilor"], value="hamer",
+                    label="伪标后端",
+                    info="hamer: 原版, 稳; wilor: 新版, 通常更准, 输出 npz 格式一致")
+                ps_force = gr.Checkbox(label="Force re-run (覆盖已存在的 npz)")
                 ps_mp4 = gr.Checkbox(label="同时生成 _pseudo_vis mp4 + 每帧 jpg",
                                       value=True)
                 btn_ps = gr.Button("Generate pseudo labels", variant="primary")
                 out_ps = gr.JSON(label="Pseudo label summary")
                 preview_ps = gr.Video(label="_pseudo_vis 全帧 overlay mp4")
                 log_ps = gr.Code(label="Error / Traceback", language="markdown")
-                btn_ps.click(cb_pseudo, [ps_force, ps_mp4],
+                btn_ps.click(cb_pseudo, [ps_backend, ps_force, ps_mp4],
                              [out_ps, status_box, preview_ps, log_ps])
 
             # ── Step 4: Finetune ──────────────────────────────────

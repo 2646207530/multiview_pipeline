@@ -39,7 +39,7 @@ plyfile
 smplx==0.1.28
 manopth @ git+https://github.com/hassony2/manopth.git
 manotorch @ git+https://github.com/lixiny/manotorch.git
-chumpy @ git+https://github.com/mattloper/chumpy.git
+chumpy==0.71
 
 
 # ── pytorch3d (依赖 fvcore / iopath, 必须先装) ─────────────────────
@@ -66,6 +66,15 @@ easydict
 tensorboardX
 line-profiler
 termcolor
+
+# ── WiLoR (model/WiLoR 推理 + Gradio demo) ────────────────────────
+# 实际用到的: ultralytics (手检 YOLO).
+# 其余三个 (submitit/colorlog/pyrootutils) WiLoR 官方 requirements 里有,
+# 推理路径用不上, 留作训练/sweep 备用.
+ultralytics==8.1.34
+hydra-submitit-launcher
+hydra-colorlog
+pyrootutils
 
 # ── 推理优化 (HaMER 可选 ONNX 加速) ────────────────────────────────
 onnx

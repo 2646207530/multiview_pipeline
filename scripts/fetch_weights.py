@@ -60,6 +60,16 @@ ITEMS: list[tuple[str, str]] = [
      "model/hamer/_DATA/data/mano_mean_params.npz"),
     ("Hand_Estimation/mano_data/mano_mean_params.npz",
      "model/Hand_Estimation/mano_data/mano_mean_params.npz"),
+    # WiLoR (原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
+    ("WiLoR/detector.pt",
+     "model/WiLoR/pretrained_models/detector.pt"),
+    ("WiLoR/wilor_final.ckpt",
+     "model/WiLoR/pretrained_models/wilor_final.ckpt"),
+    # WiLoR mano_data (MANO_RIGHT 受 license 约束, 按用户要求统一拉)
+    ("WiLoR/mano_data/mano_mean_params.npz",
+     "model/WiLoR/mano_data/mano_mean_params.npz"),
+    ("WiLoR/mano_data/MANO_RIGHT.pkl",
+     "model/WiLoR/mano_data/MANO_RIGHT.pkl"),
 ]
 
 # 如果你上传时启了 INCLUDE_MANO, 加 --with-mano 也会拉这些

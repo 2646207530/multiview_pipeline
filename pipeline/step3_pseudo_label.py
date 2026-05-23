@@ -1,12 +1,12 @@
-"""Step 3: 用 step2 的 bbox 喂 HaMER 拿 21 个 2D 关节, 写伪标 npz.
+"""Step 3: 用 step2 的 bbox 喂伪标后端 (HaMER / WiLoR) 拿 21 个 2D 关节, 写 npz.
 
 输入: workspace/detections.json + 去畸变图.
 输出: ``.undistorted/pseudo_label_wilor/<seq>_<cam>_<frame>_<hand>.npz``
        字段: is_right (1,), joints_2d (21, 2)
 末尾: 调 make_pseudo_video 出全帧拼接 mp4 + jpg.
 
-注意: 跟现有 ``write_pseudo_labels_from_hamer`` 的 HaMER 部分等价, 只是不再
-现场跑 YOLO (改成读 step2 的 json).
+后端通过 ``backend`` 参数二选一, 共用 pseudo_backends.make_backend, 输出 npz
+格式不随后端变. 默认 ``hamer`` 保持向后兼容.
 """
 
 from __future__ import annotations
@@ -24,10 +24,9 @@ _PROJECT = Path(__file__).resolve().parent.parent
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-from model.hamer.infer import hamer_inference  # type: ignore
-from model.config.hamer_config import hamer_opt  # type: ignore
 from multiview_hand_init import make_pseudo_video  # type: ignore
 
+from .pseudo_backends import make_backend, VALID_BACKENDS
 from .state import PipelineState
 from .workspace import Workspace
 
@@ -39,7 +38,11 @@ def _load_newK_from_yaml(yaml_path: Path) -> np.ndarray:
 
 
 def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
-        force: bool = False, make_video: bool = True) -> Dict[str, Any]:
+        force: bool = False, make_video: bool = True,
+        backend: str = "hamer") -> Dict[str, Any]:
+    if backend not in VALID_BACKENDS:
+        raise ValueError(f"backend 必须是 {VALID_BACKENDS} 之一, 收到 {backend!r}")
+
     state = PipelineState.load(ws)
     if state.steps.get("detect").status != "done":
         raise RuntimeError("Step 2 (detect) 没完成")
@@ -54,10 +57,10 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
     bbox_data: Dict[str, Dict[str, list]] = json.loads(
         Path(detect["detections_json"]).read_text())
 
-    # 准备 HaMER
+    # 准备后端 (HaMER ~10-30s, WiLoR ~5-10s)
     if progress:
-        progress(0.0, "加载 HaMER (~10-30s)...")
-    hamer = hamer_inference(hamer_opt)
+        progress(0.0, f"加载伪标后端 {backend}...")
+    estimator = make_backend(backend)
 
     # 准备 K (每个 cam 一个)
     Ks: Dict[int, np.ndarray] = {}
@@ -101,17 +104,8 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
                 if p.exists() and not force:
                     n_skip += 1
                     continue
-                bbox_for_hamer = [hand_label, entry[1]]
-                try:
-                    out, _ = hamer.estimate_from_rgb(image, [bbox_for_hamer], K)
-                except Exception as e:
-                    print(f"[step3] HaMER fail cam{ci} f{fid} {hand_label}: {e}")
-                    continue
-                kp2d = out.get("pred_keypoints_2d_full")
+                kp2d = estimator.estimate_2d(image, hand_label, entry[1], K)
                 if kp2d is None:
-                    continue
-                kp2d = kp2d.detach().cpu().numpy().squeeze().astype(np.float32)
-                if kp2d.ndim != 2 or kp2d.shape[1] != 2:
                     continue
                 np.savez(p,
                          is_right=np.array([1.0 if hid == 0 else 0.0],
@@ -120,7 +114,7 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
                 n_ok[str(ci)] += 1
                 if progress and processed % 20 == 0:
                     progress(processed / max(total_hands, 1),
-                             f"HaMER  cam{ci} f{fid:06d} {hand_label}"
+                             f"{backend}  cam{ci} f{fid:06d} {hand_label}"
                              f"  ({processed}/{total_hands}, skip={n_skip})")
 
     # 生成可视化视频 + 每帧 jpg (拼 cam0|cam1)
@@ -150,6 +144,7 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
         "pseudo_label_dir": str(out_dir),
         "n_pseudo_per_cam": n_ok,
         "pseudo_overlay_mp4": video_path,
+        "backend": backend,
     }
     state.mark_done("pseudo", **info)
     state.save(ws)

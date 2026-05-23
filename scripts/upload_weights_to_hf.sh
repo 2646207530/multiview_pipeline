@@ -36,6 +36,12 @@ declare -a ITEMS=(
   "hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx:model/hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx"
   "hamer/_DATA/data/mano_mean_params.npz:model/hamer/_DATA/data/mano_mean_params.npz"
   "Hand_Estimation/mano_data/mano_mean_params.npz:model/Hand_Estimation/mano_data/mano_mean_params.npz"
+  # WiLoR (原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
+  "WiLoR/detector.pt:model/WiLoR/pretrained_models/detector.pt"
+  "WiLoR/wilor_final.ckpt:model/WiLoR/pretrained_models/wilor_final.ckpt"
+  # WiLoR mano_data (MANO_RIGHT.pkl 受 license 约束, 按用户要求统一上传; 请确保 HF repo private)
+  "WiLoR/mano_data/mano_mean_params.npz:model/WiLoR/mano_data/mano_mean_params.npz"
+  "WiLoR/mano_data/MANO_RIGHT.pkl:model/WiLoR/mano_data/MANO_RIGHT.pkl"
 )
 
 # MANO (license restricted) — 只在 INCLUDE_MANO=1 时加入
