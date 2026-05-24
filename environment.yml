@@ -14,6 +14,13 @@
 # 注意: torchgeometry 在新版 PyTorch 下有个 bool tensor bug
 # (`1 - mask`), 项目内通过 lib/utils/_torchgeometry_patch.py 运行时 monkey-patch
 # 修复, 不需要手动改 site-packages.
+#
+# 警告: model/sam2/ 的 setup.py 写了 torch>=2.5.1, 如果直接
+# `pip install -e model/sam2/` 会把 torch 升到 2.12+cu130, 老 NVIDIA 驱动
+# 会 CUDA init 失败. 务必加 --no-deps:
+#     pip install -e model/sam2/ --no-deps
+# (sam2 的 runtime 跟 torch 2.1.2 兼容, setup.py 那个版本号是 SAM2 团队
+# 保守起见写的, 实际用不到 2.5+ 特性.)
 # =============================================================================
 
 name: golf_pipeline

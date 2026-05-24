@@ -70,6 +70,15 @@ ITEMS: list[tuple[str, str]] = [
      "model/WiLoR/mano_data/mano_mean_params.npz"),
     ("WiLoR/mano_data/MANO_RIGHT.pkl",
      "model/WiLoR/mano_data/MANO_RIGHT.pkl"),
+    # SAM2 4 个 size (pipeline 默认 large, 其他备选)
+    ("sam2/checkpoints/sam2.1_hiera_tiny.pt",
+     "model/sam2/checkpoints/sam2.1_hiera_tiny.pt"),
+    ("sam2/checkpoints/sam2.1_hiera_small.pt",
+     "model/sam2/checkpoints/sam2.1_hiera_small.pt"),
+    ("sam2/checkpoints/sam2.1_hiera_base_plus.pt",
+     "model/sam2/checkpoints/sam2.1_hiera_base_plus.pt"),
+    ("sam2/checkpoints/sam2.1_hiera_large.pt",
+     "model/sam2/checkpoints/sam2.1_hiera_large.pt"),
 ]
 
 # 如果你上传时启了 INCLUDE_MANO, 加 --with-mano 也会拉这些

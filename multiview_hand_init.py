@@ -529,6 +529,21 @@ def make_mv_mano_video(undist_root: Path, capture_id: str,
 
 
 # -------------------------------------------------- Hand_Estimation runner --
+def _prepend_conda_lib_to_ld_path(env: dict) -> dict:
+    """让 subprocess 的 dynamic loader 用 conda env 的 libstdc++ 等共享库.
+
+    背景: Pillow 12 的 libLerc.so.4 / SAM2 牵涉的一些 C++ 扩展要 GLIBCXX_3.4.29,
+    系统的 /lib/x86_64-linux-gnu/libstdc++.so.6 太老没这个符号 → ImportError.
+    conda env 自带较新的 libstdc++.so.6, 把 env/lib 放 LD_LIBRARY_PATH 前面就行.
+    """
+    lib_dir = Path(sys.executable).resolve().parent.parent / "lib"
+    if not lib_dir.is_dir():
+        return env
+    old = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{lib_dir}:{old}" if old else str(lib_dir)
+    return env
+
+
 def run_hand_estimation_subprocess(project_root: Path, undist_root: Path,
                                    output_dir: Path, gpu_id: str = "0",
                                    cfg_rel: str = _HE_CFG_REL,
@@ -560,6 +575,7 @@ def run_hand_estimation_subprocess(project_root: Path, undist_root: Path,
     if extra_env:
         env.update(extra_env)
     env.setdefault("CUDA_VISIBLE_DEVICES", gpu_id)
+    _prepend_conda_lib_to_ld_path(env)
 
     # ckpt_override 路径要用绝对路径做软链, 避免 cwd 变化
     symlink_path = he_dir / "checkpoints"
@@ -674,6 +690,7 @@ def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Pat
     if extra_env:
         env.update(extra_env)
     env.setdefault("CUDA_VISIBLE_DEVICES", gpu_id)
+    _prepend_conda_lib_to_ld_path(env)
     cmd = [
         sys.executable, "train_ddp_sf.py",
         "--cfg", str(ft_yaml_path),

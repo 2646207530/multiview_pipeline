@@ -42,6 +42,12 @@ declare -a ITEMS=(
   # WiLoR mano_data (MANO_RIGHT.pkl 受 license 约束, 按用户要求统一上传; 请确保 HF repo private)
   "WiLoR/mano_data/mano_mean_params.npz:model/WiLoR/mano_data/mano_mean_params.npz"
   "WiLoR/mano_data/MANO_RIGHT.pkl:model/WiLoR/mano_data/MANO_RIGHT.pkl"
+  # SAM2 (官方权重, 一共 4 个 size; pipeline 默认用 large, 其他备选).
+  # 总计 ~1.5GB. 不想全传可以注释掉 tiny/small/base_plus.
+  "sam2/checkpoints/sam2.1_hiera_tiny.pt:model/sam2/checkpoints/sam2.1_hiera_tiny.pt"
+  "sam2/checkpoints/sam2.1_hiera_small.pt:model/sam2/checkpoints/sam2.1_hiera_small.pt"
+  "sam2/checkpoints/sam2.1_hiera_base_plus.pt:model/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
+  "sam2/checkpoints/sam2.1_hiera_large.pt:model/sam2/checkpoints/sam2.1_hiera_large.pt"
 )
 
 # MANO (license restricted) — 只在 INCLUDE_MANO=1 时加入

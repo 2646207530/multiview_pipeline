@@ -1,6 +1,6 @@
-"""Step 2: 双手检测 (YOLO only, 没 SAM v1).
+"""Step 2: 双手检测 (YOLO 逐帧 / SAM2 序列分割).
 
-每帧每相机跑 YOLO, 输出 ``workspace/detections.json``:
+每帧每相机跑后端, 输出 ``workspace/detections.json``:
 
 {
   "0": {                           # cam_idx
@@ -11,9 +11,17 @@
   "1": {...}
 }
 
-预览: 拿 cam0 第一帧带 bbox 画一张 JPG 给前端展示.
+预览: 每相机拼一段 overlay mp4 给前端展示.
 
-复用: ``yolo.detector.Detector`` + ``parse_detections``.
+后端通过 ``backend`` 参数选 ("yolo" / "sam2"). SAM2 需要用户在首帧给每只手
+打 (正/负) 点 prompt; 通过 ``sam2_prompts`` 传入, 形如:
+{
+  "0": {  # cam_idx_str
+    "right": {"pos": [[x,y], ...], "neg": [[x,y], ...]},
+    "left":  {"pos": [...], "neg": [...]},
+  },
+  "1": {...}
+}
 """
 
 from __future__ import annotations
@@ -30,16 +38,9 @@ _PROJECT = Path(__file__).resolve().parent.parent
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-from yolo.detector import Detector  # type: ignore
-from config.yolo_config import yolo_opt  # type: ignore
-from run_hamer_to_npy import parse_detections  # type: ignore
-
+from .detect_backends import make_backend, VALID_BACKENDS
 from .state import PipelineState
 from .workspace import Workspace
-
-
-def _build_detector() -> Detector:
-    return Detector(yolo_opt)
 
 
 def _draw_overlay(img: np.ndarray, bboxes: List[list]) -> np.ndarray:
@@ -84,7 +85,11 @@ def _write_overlay_video(cam_dir: Path,
 
 
 def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
-        force: bool = False) -> Dict[str, Any]:
+        force: bool = False, backend: str = "yolo",
+        sam2_prompts: Optional[dict] = None) -> Dict[str, Any]:
+    if backend not in VALID_BACKENDS:
+        raise ValueError(f"backend 必须是 {VALID_BACKENDS} 之一, 收到 {backend!r}")
+
     state = PipelineState.load(ws)
     undist = state.steps.get("undistort", None)
     if undist is None or undist.status != "done":
@@ -97,40 +102,14 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
     if ws.detections_json.exists() and not force:
         bbox_data = json.loads(ws.detections_json.read_text())
     else:
-        detector = _build_detector()
-        bbox_data: Dict[str, Dict[str, list]] = {str(c): {} for c in range(n_cams)}
-
-        # 收集所有 (cam_idx, frame_id, img_path)
-        tasks = []
-        for ci in range(n_cams):
-            d = undist_root / capture_id / str(ci) / "images_undistorted"
-            for p in sorted(d.glob("*.jpg")):
-                try:
-                    fid = int(p.stem)
-                except ValueError:
-                    continue
-                tasks.append((ci, fid, p))
-
-        total = len(tasks)
-        for k, (ci, fid, img_path) in enumerate(tasks):
-            if progress and k % 20 == 0:
-                progress(k / max(total, 1),
-                         f"YOLO detect cam{ci} frame {fid:06d}  ({k}/{total})")
-            img = cv2.imread(str(img_path))
-            if img is None:
-                continue
-            _, dets = detector.detect(img)
-            bboxes = parse_detections(dets)
-            # 过滤无效的, 只留 left / right hand
-            clean = []
-            for entry in bboxes:
-                if not entry or len(entry) < 2:
-                    continue
-                if entry[0] not in ("right", "left"):
-                    continue
-                clean.append([entry[0], [float(x) for x in entry[1]]])
-            if clean:
-                bbox_data[str(ci)][f"{fid:06d}"] = clean
+        if progress:
+            progress(0.0, f"加载检测后端 {backend}...")
+        detector_backend = make_backend(backend)
+        bbox_data = detector_backend.detect_all(
+            undist_root, capture_id, n_cams,
+            progress=progress,
+            prompts=sam2_prompts if backend == "sam2" else None,
+        )
 
         ws.detections_json.parent.mkdir(parents=True, exist_ok=True)
         ws.detections_json.write_text(json.dumps(bbox_data, ensure_ascii=False))
@@ -160,6 +139,7 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
         "vis_videos":        vis_videos,
         # 保留 sample_preview 字段兼容前端; 指向 cam0 视频
         "sample_preview":    vis_videos.get("0"),
+        "backend":           backend,
     }
     state.mark_done("detect", **info)
     state.save(ws)

@@ -25,7 +25,9 @@ _gradio_tmp = (os.environ.get("GRADIO_TEMP_DIR")
 Path(_gradio_tmp).mkdir(parents=True, exist_ok=True)
 os.environ["GRADIO_TEMP_DIR"] = _gradio_tmp
 
+import cv2
 import gradio as gr
+import numpy as np
 
 _PROJECT = Path(__file__).resolve().parent
 if str(_PROJECT) not in sys.path:
@@ -212,12 +214,173 @@ def cb_ud_browse(frame_idx):
     return _ud_frame_image(0, fi), _ud_frame_image(1, fi)
 
 
-def cb_detect(force: bool, progress=gr.Progress(track_tqdm=False)):
+# ── SAM2 标注辅助 ──────────────────────────────────────────────────
+_SAM2_LABELS = ("right_pos", "right_neg", "left_pos", "left_neg")
+_SAM2_POINT_COLOR = {
+    "right_pos": (40, 220, 40),
+    "right_neg": (220, 40, 40),
+    "left_pos":  (40, 200, 255),
+    "left_neg":  (200, 80, 255),
+}
+# mask 叠色 (RGB)
+_SAM2_MASK_COLOR = {
+    "right": (50, 220, 50),
+    "left":  (50, 180, 255),
+}
+
+
+def _sam2_state_init(ci=None) -> dict:
+    return {
+        "right": {"pos": [], "neg": [], "mask": None},
+        "left":  {"pos": [], "neg": [], "mask": None},
+        "image": None,
+        "ci":    ci,
+    }
+
+
+def _sam2_render(state: dict):
+    """渲染顺序: 原图 → 各手 mask 半透明叠加 → 各点圆点叠上."""
+    if state is None or state.get("image") is None:
+        return None
+    img = state["image"].copy()
+    # 1. mask 半透明
+    for hand in ("right", "left"):
+        m = state[hand].get("mask")
+        if m is None:
+            continue
+        color = _SAM2_MASK_COLOR[hand]
+        overlay = img.copy()
+        overlay[m] = color
+        img = cv2.addWeighted(img, 0.55, overlay, 0.45, 0.0)
+    # 2. 点 (大一圈, 方便看清)
+    for hand in ("right", "left"):
+        for typ in ("pos", "neg"):
+            color = _SAM2_POINT_COLOR[f"{hand}_{typ}"]
+            marker = "+" if typ == "pos" else "-"
+            for x, y in state[hand][typ]:
+                cv2.circle(img, (int(x), int(y)), 10, color, -1)
+                cv2.circle(img, (int(x), int(y)), 10, (255, 255, 255), 2)
+                # 中心画 +/- 标记
+                cv2.putText(img, marker, (int(x) - 5, int(y) + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 0, 0), 2, cv2.LINE_AA)
+    return img
+
+
+def _sam2_recompute_mask(state: dict, hand: str):
+    """对某只手, 跑 SAM2 image predict 拿 mask, 写回 state.
+    如果 set_image 没被调过 (Load 没点 / 失败), 会用 state 里的 image 自动补."""
+    from pipeline.sam2_interactive import predict_hand_mask
+    ci = state.get("ci")
+    pos = state[hand]["pos"]
+    neg = state[hand]["neg"]
+    if ci is None or not pos:
+        state[hand]["mask"] = None
+        return
+    try:
+        state[hand]["mask"] = predict_hand_mask(
+            ci, pos, neg,
+            image_rgb_fallback=state.get("image"),
+        )
+    except Exception as e:
+        print(f"[sam2 interactive] cam{ci} {hand} predict fail: {e}")
+        state[hand]["mask"] = None
+
+
+def cb_sam2_load_frames():
+    """从 ws 的 undistort 输出读 cam0/cam1 首帧 + 给 SAM2 image predictor
+    各做一次 set_image (heavy, ~5-10s 一次)."""
+    from pipeline.sam2_interactive import set_image_for_cam, reset_cam
+    try:
+        ws = _ws_or_raise()
+    except Exception as e:
+        return (None, None, _sam2_state_init(0), _sam2_state_init(1), str(e))
+    state = PipelineState.load(ws)
+    ud = state.steps.get("undistort")
+    if ud is None or ud.status != "done":
+        return (None, None, _sam2_state_init(0), _sam2_state_init(1),
+                "Step 1 (undistort) 没完成, 先跑去畸变.")
+    undist_root = Path(ud.outputs["undist_root"])
+    capture_id = ud.outputs["capture_id"]
+    out_imgs, out_states, errs = [], [], []
+    for ci in (0, 1):
+        d = undist_root / capture_id / str(ci) / "images_undistorted"
+        first = next(iter(sorted(d.glob("*.jpg"))), None)
+        if first is None:
+            errs.append(f"cam{ci}: 找不到首帧 (在 {d})")
+            out_imgs.append(None)
+            out_states.append(_sam2_state_init(ci))
+            continue
+        bgr = cv2.imread(str(first))
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) if bgr is not None else None
+        s = _sam2_state_init(ci)
+        s["image"] = rgb
+        # heavy: 给 SAM2 image predictor 喂图
+        reset_cam(ci)
+        if rgb is not None:
+            try:
+                set_image_for_cam(ci, rgb)
+            except Exception as e:
+                errs.append(f"cam{ci} set_image fail: {e}")
+                print(f"[sam2 interactive] cam{ci} set_image fail: {e}")
+        out_imgs.append(rgb)
+        out_states.append(s)
+    if errs:
+        msg = "⚠️ 加载部分失败 (第一次点击会自动补 set_image 重试):\n- " + "\n- ".join(errs)
+    else:
+        msg = "✅ 已加载 cam0/cam1 首帧 + SAM2 image predictor, 可以开始点了."
+    return out_imgs[0], out_imgs[1], out_states[0], out_states[1], msg
+
+
+def cb_sam2_click(evt: gr.SelectData, state: dict, active_label: str):
+    if state is None or state.get("image") is None:
+        return (state.get("image") if state else None), state
+    x, y = evt.index
+    hand, typ = active_label.split("_")
+    state[hand][typ].append([float(x), float(y)])
+    # 即时重算这只手的 mask
+    _sam2_recompute_mask(state, hand)
+    return _sam2_render(state), state
+
+
+def cb_sam2_clear(state: dict):
+    """清掉这个 cam 的所有标点 + mask, 保留 image 和 ci."""
+    img = state.get("image") if state else None
+    ci = state.get("ci") if state else None
+    s = _sam2_state_init(ci)
+    s["image"] = img
+    return _sam2_render(s), s
+
+
+def cb_detect(backend: str, force: bool,
+              ann0: dict, ann1: dict,
+              progress=gr.Progress(track_tqdm=False)):
     ws = _ws_or_raise()
     def _p(frac, msg):
         progress(frac, desc=msg)
+
+    sam2_prompts = None
+    if backend == "sam2":
+        sam2_prompts = {
+            str(ci): {
+                "right": {"pos": (ann or {}).get("right", {}).get("pos", []),
+                          "neg": (ann or {}).get("right", {}).get("neg", [])},
+                "left":  {"pos": (ann or {}).get("left", {}).get("pos", []),
+                          "neg": (ann or {}).get("left", {}).get("neg", [])},
+            }
+            for ci, ann in ((0, ann0), (1, ann1))
+        }
+        # 至少给一个 cam 一只手有正点
+        any_pos = any(
+            sam2_prompts[c][h]["pos"]
+            for c in ("0", "1") for h in ("right", "left")
+        )
+        if not any_pos:
+            return ({"error": "SAM2 需要在首帧给手标至少一个正样本点"},
+                    _status_md(), None, None, "")
     try:
-        info = step2_detect.run(ws, progress=_p, force=force)
+        info = step2_detect.run(ws, progress=_p, force=force,
+                                 backend=backend, sam2_prompts=sam2_prompts)
         ctx.state = PipelineState.load(ws)
         vv = info.get("vis_videos") or {}
         return (info, _status_md(),
@@ -339,8 +502,73 @@ def build_ui() -> gr.Blocks:
                 ud_frame.change(cb_ud_browse, [ud_frame],
                                 [preview_ud0, preview_ud1])
 
-            # ── Step 2: Detection ──────────────────────────────────
-            with gr.Tab("2. Hand Detection (YOLO)"):
+            # ── Step 2: Detection (YOLO / SAM2) ─────────────────────
+            with gr.Tab("2. Hand Detection"):
+                det_backend = gr.Radio(
+                    choices=["yolo", "sam2"], value="yolo",
+                    label="检测后端",
+                    info="yolo: 逐帧 YOLO; sam2: 首帧手动标正/负点 → 自动 propagate 到全帧")
+
+                # SAM2 标注 state (始终存在; sam2 不选用时也无害)
+                ann_state0 = gr.State(_sam2_state_init(0))
+                ann_state1 = gr.State(_sam2_state_init(1))
+
+                with gr.Group(visible=False) as sam2_panel:
+                    gr.Markdown(
+                        "**SAM2 标注流程**: 点 **Load first frames** 拉首帧 + 加载 SAM2 (~5-10s) → "
+                        "选 **当前点类型** (右手正 / 右手负 / 左手正 / 左手负) → "
+                        "在图上点击加点 (每点击一次即时看到这只手的 mask, 觉得不准可以继续加点) → "
+                        "点 **Run hand detection** 进入序列分割.\n\n"
+                        "**点颜色**: 绿=右手正, 红=右手负, 蓝=左手正, 紫=左手负. "
+                        "**mask**: 绿色半透明=右手, 蓝色半透明=左手.\n"
+                        "**约束**: 每个 cam 至少给一只手 ≥1 个正点."
+                    )
+                    with gr.Row():
+                        btn_sam2_load = gr.Button("Load first frames", variant="secondary")
+                        sam2_log = gr.Markdown("")
+
+                    # cam0 板块 (整个一行宽, 大图)
+                    gr.Markdown("### cam0")
+                    with gr.Row():
+                        ann_active0 = gr.Radio(
+                            choices=list(_SAM2_LABELS),
+                            value="right_pos",
+                            label="当前点类型 (cam0)",
+                            scale=2)
+                        btn_clear0 = gr.Button("Clear cam0 points", scale=1)
+                    ann_img0 = gr.Image(label="cam0 first frame (点击加点)",
+                                          interactive=False, height=700)
+
+                    # cam1 板块
+                    gr.Markdown("### cam1")
+                    with gr.Row():
+                        ann_active1 = gr.Radio(
+                            choices=list(_SAM2_LABELS),
+                            value="right_pos",
+                            label="当前点类型 (cam1)",
+                            scale=2)
+                        btn_clear1 = gr.Button("Clear cam1 points", scale=1)
+                    ann_img1 = gr.Image(label="cam1 first frame (点击加点)",
+                                          interactive=False, height=700)
+
+                    btn_sam2_load.click(
+                        cb_sam2_load_frames, [],
+                        [ann_img0, ann_img1, ann_state0, ann_state1, sam2_log])
+                    ann_img0.select(cb_sam2_click,
+                                     [ann_state0, ann_active0],
+                                     [ann_img0, ann_state0])
+                    ann_img1.select(cb_sam2_click,
+                                     [ann_state1, ann_active1],
+                                     [ann_img1, ann_state1])
+                    btn_clear0.click(cb_sam2_clear, [ann_state0],
+                                       [ann_img0, ann_state0])
+                    btn_clear1.click(cb_sam2_clear, [ann_state1],
+                                       [ann_img1, ann_state1])
+
+                def _toggle_sam2(b):
+                    return gr.update(visible=(b == "sam2"))
+                det_backend.change(_toggle_sam2, [det_backend], [sam2_panel])
+
                 det_force = gr.Checkbox(label="Force re-detect (重跑全部帧)")
                 btn_det = gr.Button("Run hand detection", variant="primary")
                 out_det = gr.JSON(label="Detection summary")
@@ -348,7 +576,8 @@ def build_ui() -> gr.Blocks:
                     preview_det0 = gr.Video(label="cam0 bbox overlay mp4")
                     preview_det1 = gr.Video(label="cam1 bbox overlay mp4")
                 log_det = gr.Code(label="Error / Traceback", language="markdown")
-                btn_det.click(cb_detect, [det_force],
+                btn_det.click(cb_detect,
+                              [det_backend, det_force, ann_state0, ann_state1],
                               [out_det, status_box,
                                preview_det0, preview_det1, log_det])
 

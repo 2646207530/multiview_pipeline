@@ -31,6 +31,9 @@ conda activate golf_pipeline
 pip install --no-build-isolation -r requirements.txt
 # 安pytorch3d
 pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+# 安 SAM2 (editable). 务必加 --no-deps, 否则会把 torch / numpy / Pillow 升到更新版本,
+# 跟 environment.yml 锁的 torch 2.1.2+cu118 不兼容, 老 NVIDIA 驱动会直接 CUDA init 失败.
+pip install -e model/sam2/ --no-deps
 
 
 # 3) 拉权重 (见下文「权重 setup」)
