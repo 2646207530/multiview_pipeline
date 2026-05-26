@@ -14,7 +14,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # 避免共享机器上 /tmp/gradio 被别人创建后 PermissionDenied.
 # 优先用 GRADIO_TEMP_DIR / TMPDIR; 否则 fallback 到家目录下私有目录.
@@ -24,6 +24,11 @@ _gradio_tmp = (os.environ.get("GRADIO_TEMP_DIR")
                 or str(Path.home() / ".gradio_tmp"))
 Path(_gradio_tmp).mkdir(parents=True, exist_ok=True)
 os.environ["GRADIO_TEMP_DIR"] = _gradio_tmp
+
+# 强制 CUDA 设备按 PCI bus 编号, 跟 nvidia-smi 对齐.
+# 默认 FASTEST_FIRST 会按性能重排, 同一张物理卡在 CUDA_VISIBLE_DEVICES 里的
+# 编号跟 nvidia-smi 看到的可能不一样. 必须在 import torch 之前设.
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 import cv2
 import gradio as gr
@@ -112,13 +117,102 @@ def _ud_slider_max(o1: dict) -> int:
     return 1
 
 
+# ── Step 2/3/5 单帧 viewer 辅助 ─────────────────────────────────────
+def _det_load_detections() -> dict:
+    """加载 detections.json (bbox_data); 失败返回空 dict."""
+    if ctx.state is None:
+        return {}
+    det = ctx.state.steps.get("detect")
+    if det is None or det.status != "done":
+        return {}
+    import json as _json
+    p = det.outputs.get("detections_json")
+    if not p or not Path(p).exists():
+        return {}
+    try:
+        return _json.loads(Path(p).read_text())
+    except Exception:
+        return {}
+
+
+def _det_frame_image(cam_idx: int, frame_idx: int):
+    """实时渲染单帧 bbox overlay (RGB ndarray). 不存在返回 None."""
+    if ctx.state is None:
+        return None
+    ud = ctx.state.steps.get("undistort")
+    if ud is None or ud.status != "done":
+        return None
+    o = ud.outputs
+    p = (Path(o["undist_root"]) / o["capture_id"] / str(cam_idx) /
+         "images_undistorted" / f"{int(frame_idx):06d}.jpg")
+    if not p.exists():
+        return None
+    img = cv2.imread(str(p))
+    if img is None:
+        return None
+    bbox_data = _det_load_detections()
+    bboxes = (bbox_data.get(str(cam_idx)) or {}).get(f"{int(frame_idx):06d}", [])
+    for entry in bboxes:
+        if not entry or len(entry) < 2:
+            continue
+        label, bb = entry[0], entry[1]
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bb]
+        except Exception:
+            continue
+        color = (0, 255, 0) if label == "right" else (64, 128, 255)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(img, label, (x1, max(20, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def cb_det_browse(frame_idx):
+    fi = int(frame_idx) if frame_idx is not None else 0
+    return _det_frame_image(0, fi), _det_frame_image(1, fi)
+
+
+def _ps_frame_image(frame_idx: int):
+    """读 _pseudo_vis/<seq>_<frame:06d>.jpg (cam0|cam1 stitched). 返回 path 或 None."""
+    if ctx.state is None:
+        return None
+    ud = ctx.state.steps.get("undistort")
+    if ud is None or ud.status != "done":
+        return None
+    o = ud.outputs
+    p = (Path(o["undist_root"]) / "_pseudo_vis" /
+         f"{o['capture_id']}_{int(frame_idx):06d}.jpg")
+    return str(p) if p.exists() else None
+
+
+def cb_ps_browse(frame_idx):
+    fi = int(frame_idx) if frame_idx is not None else 0
+    return _ps_frame_image(fi)
+
+
+def _inf_frame_image(hand_id: int, frame_idx: int):
+    """读 _he_output/<seq>_hand{hand_id}/<frame:06d>.jpg 单帧."""
+    if ctx.state is None or ctx.workspace is None:
+        return None
+    ws = ctx.workspace
+    p = (ws.he_output_dir / f"{ws.seq_name}_hand{int(hand_id)}" /
+         f"{int(frame_idx):06d}.jpg")
+    return str(p) if p.exists() else None
+
+
+def cb_inf_browse(frame_idx):
+    fi = int(frame_idx) if frame_idx is not None else 0
+    return _inf_frame_image(0, fi), _inf_frame_image(1, fi)
+
+
 def _list_workspace_ckpts(ws: Workspace) -> list:
-    """列出 <workspace>/_finetune/ 下含 TestMultiviewStereo.pth.tar 的子目录."""
+    """列出 <workspace>/_finetune/ 下含任意 *.pth.tar 的子目录.
+    不写死 model 类名 (FlipModel 之类切换时 ckpt 文件名也会变)."""
     if ws is None or not ws.finetune_dir.is_dir():
         return []
     out = []
     for p in sorted(ws.finetune_dir.iterdir()):
-        if p.is_dir() and (p / "TestMultiviewStereo.pth.tar").is_file():
+        if p.is_dir() and any(p.glob("*.pth.tar")):
             out.append(str(p))
     return out
 
@@ -156,13 +250,35 @@ def _restore_previews_from_state(state: PipelineState):
     ud_max = _ud_slider_max(o1)
     ud_slider = (gr.Slider(minimum=0, maximum=ud_max, value=0, step=1)
                  if o1 else gr.Slider())
+    # step 2/3/5 sliders 跟 undistort 共用同一个总帧数
+    frame_max = _ud_slider_max(o1)
+    det_slider = (gr.Slider(minimum=0, maximum=frame_max, value=0, step=1)
+                  if o2 else gr.Slider())
+    ps_slider = (gr.Slider(minimum=0, maximum=frame_max, value=0, step=1)
+                  if o3 else gr.Slider())
+    inf_slider = (gr.Slider(minimum=0, maximum=frame_max, value=0, step=1)
+                  if o5 else gr.Slider())
     return (
+        # step 1 (4)
         o1, ud_slider, _ud_frame_image(0, 0), _ud_frame_image(1, 0),
+        # step 2 (6: o2, vid0, vid1, slider, img0, img1)
         o2, _existing(det_videos.get("0")), _existing(det_videos.get("1")),
+            det_slider,
+            _det_frame_image(0, 0) if o2 else None,
+            _det_frame_image(1, 0) if o2 else None,
+        # step 3 (4: o3, vid, slider, img)
         o3, _existing(o3.get("pseudo_overlay_mp4")),
+            ps_slider,
+            _ps_frame_image(0) if o3 else None,
+        # step 4 (1)
         o4,
+        # step 5 (7: o5, hand0, hand1, npy, slider, img0, img1)
         o5, _existing(o5.get("hand0_mp4")), _existing(o5.get("hand1_mp4")),
             _existing(o5.get("npy_path")),
+            inf_slider,
+            _inf_frame_image(0, 0) if o5 else None,
+            _inf_frame_image(1, 0) if o5 else None,
+        # step 6 (3)
         o6,
         _existing(view_videos[0]) if len(view_videos) > 0 else None,
         _existing(view_videos[1]) if len(view_videos) > 1 else None,
@@ -184,12 +300,18 @@ def cb_setup(capture_dir: str, seq_name: str, auto_extract_raw: bool,
                 + _restore_previews_from_state(ctx.state)
                 + (_ckpt_dropdown_update(ctx.workspace, ctx.state),))
     except Exception as e:
-        # restore 元组结构: 17 项 (step1: o1+slider+ud0+ud1, step2-6 同前)
+        # restore 元组结构: 25 项
+        # step1: o1+slider+ud0+ud1                                       (4)
+        # step2: o2+vid0+vid1+det_slider+det_img0+det_img1               (6)
+        # step3: o3+ps_vid+ps_slider+ps_img                              (4)
+        # step4: o4                                                       (1)
+        # step5: o5+hand0+hand1+npy+inf_slider+inf_img0+inf_img1         (7)
+        # step6: o6+view0+view1                                          (3)
         empty = (None, gr.Slider(), None, None,
-                 None, None, None,
-                 None, None,
+                 None, None, None, gr.Slider(), None, None,
+                 None, None, gr.Slider(), None,
                  None,
-                 None, None, None, None,
+                 None, None, None, None, gr.Slider(), None, None,
                  None, None, None)
         return ({"error": str(e)}, _status_md(),
                 traceback.format_exc()) + empty + (gr.Dropdown(),)
@@ -230,106 +352,194 @@ _SAM2_MASK_COLOR = {
 
 
 def _sam2_state_init(ci=None) -> dict:
+    """state 结构改成多 anchor: state["anchors"][frame_idx] 才是真正的标注内容.
+    顶层 right/left 不再存; 渲染时按 frame_idx 取对应 anchor."""
     return {
-        "right": {"pos": [], "neg": [], "mask": None},
-        "left":  {"pos": [], "neg": [], "mask": None},
-        "image": None,
-        "ci":    ci,
+        "image":     None,
+        "ci":        ci,
+        "frame_idx": 0,    # 当前在显示哪一帧 (浏览用, 不强制是 anchor)
+        "n_frames":  0,
+        "anchors":   {},   # {frame_idx: {"right": {"pos":[], "neg":[], "mask": np|None},
+                            #              "left":  {...}}}
     }
 
 
-def _sam2_render(state: dict):
-    """渲染顺序: 原图 → 各手 mask 半透明叠加 → 各点圆点叠上."""
+def _sam2_get_anchor(state: dict, frame_idx) -> dict:
+    """拿当前 frame_idx 的 anchor entry, 没有就创建一个空的."""
+    fi = int(frame_idx)
+    if fi not in state["anchors"]:
+        state["anchors"][fi] = {
+            "right": {"pos": [], "neg": [], "mask": None},
+            "left":  {"pos": [], "neg": [], "mask": None},
+        }
+    return state["anchors"][fi]
+
+
+def _active_hand_from_label(active_label) -> Optional[str]:
+    """active_label 形如 'right_pos' / 'left_neg'; 取前缀 → 'right' / 'left'."""
+    if not active_label or "_" not in active_label:
+        return None
+    return active_label.split("_", 1)[0]
+
+
+def _sam2_render(state: dict, active_label: Optional[str] = None):
+    """渲染顺序: 原图 → 当前 frame 的 active 手 mask 半透明 → active 手的点.
+    多帧 anchor: 只画 state["frame_idx"] 这帧的 anchor 内容. 切到没标过的帧
+    就只显示原图."""
     if state is None or state.get("image") is None:
         return None
     img = state["image"].copy()
+    fi = state.get("frame_idx", 0)
+    anchor = state.get("anchors", {}).get(fi)
+    if anchor is None:
+        return img  # 这帧没标过, 直接出原图
+    active = _active_hand_from_label(active_label)
+    hands_to_show = (active,) if active in ("right", "left") else ("right", "left")
     # 1. mask 半透明
-    for hand in ("right", "left"):
-        m = state[hand].get("mask")
+    for hand in hands_to_show:
+        m = anchor[hand].get("mask")
         if m is None:
             continue
         color = _SAM2_MASK_COLOR[hand]
         overlay = img.copy()
         overlay[m] = color
         img = cv2.addWeighted(img, 0.55, overlay, 0.45, 0.0)
-    # 2. 点 (大一圈, 方便看清)
-    for hand in ("right", "left"):
+    # 2. 点
+    for hand in hands_to_show:
         for typ in ("pos", "neg"):
             color = _SAM2_POINT_COLOR[f"{hand}_{typ}"]
-            marker = "+" if typ == "pos" else "-"
-            for x, y in state[hand][typ]:
-                cv2.circle(img, (int(x), int(y)), 10, color, -1)
-                cv2.circle(img, (int(x), int(y)), 10, (255, 255, 255), 2)
-                # 中心画 +/- 标记
-                cv2.putText(img, marker, (int(x) - 5, int(y) + 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 0, 0), 2, cv2.LINE_AA)
+            for x, y in anchor[hand][typ]:
+                cv2.circle(img, (int(x), int(y)), 5, color, -1)
+                cv2.circle(img, (int(x), int(y)), 5, (255, 255, 255), 1)
     return img
 
 
 def _sam2_recompute_mask(state: dict, hand: str):
-    """对某只手, 跑 SAM2 image predict 拿 mask, 写回 state.
-    如果 set_image 没被调过 (Load 没点 / 失败), 会用 state 里的 image 自动补."""
+    """对当前 frame 的某只手, 跑 SAM2 image predict 拿 mask, 写回 anchors[fi]."""
     from pipeline.sam2_interactive import predict_hand_mask
     ci = state.get("ci")
-    pos = state[hand]["pos"]
-    neg = state[hand]["neg"]
+    fi = state.get("frame_idx", 0)
+    anchor = state.get("anchors", {}).get(fi)
+    if anchor is None:
+        return
+    pos = anchor[hand]["pos"]
+    neg = anchor[hand]["neg"]
     if ci is None or not pos:
-        state[hand]["mask"] = None
+        anchor[hand]["mask"] = None
         return
     try:
-        state[hand]["mask"] = predict_hand_mask(
+        anchor[hand]["mask"] = predict_hand_mask(
             ci, pos, neg,
             image_rgb_fallback=state.get("image"),
         )
     except Exception as e:
-        print(f"[sam2 interactive] cam{ci} {hand} predict fail: {e}")
-        state[hand]["mask"] = None
+        print(f"[sam2 interactive] cam{ci} fr{fi} {hand} predict fail: {e}")
+        anchor[hand]["mask"] = None
+
+
+def _sam2_load_cam_frame(undist_root: Path, capture_id: str, ci: int,
+                            frame_idx: int):
+    """读 cam ci 的指定帧 RGB. 返回 (rgb_ndarray|None, n_frames, jpg_path|None)."""
+    d = undist_root / capture_id / str(ci) / "images_undistorted"
+    jpgs = sorted(d.glob("*.jpg"), key=lambda p: int(p.stem))
+    if not jpgs:
+        return None, 0, None
+    frame_idx = max(0, min(int(frame_idx), len(jpgs) - 1))
+    bgr = cv2.imread(str(jpgs[frame_idx]))
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) if bgr is not None else None
+    return rgb, len(jpgs), jpgs[frame_idx]
 
 
 def cb_sam2_load_frames():
     """从 ws 的 undistort 输出读 cam0/cam1 首帧 + 给 SAM2 image predictor
-    各做一次 set_image (heavy, ~5-10s 一次)."""
+    各做一次 set_image (heavy, ~5-10s 一次). 同时更新两个 anchor frame slider
+    的 max 为 n_frames-1."""
     from pipeline.sam2_interactive import set_image_for_cam, reset_cam
+    # placeholder slider state (Gradio 不允许 min == max, 用 1 当占位)
+    # NOTE: 用 gr.Slider(...) 而不是 gr.update(...), 因为这版 Gradio 用 update
+    # 改 max 不会真的刷 UI; 跟 Undistort 那边的 cb_undistort 一样直接重建组件.
+    empty_slider = gr.Slider(minimum=0, maximum=1, value=0, step=1)
     try:
         ws = _ws_or_raise()
     except Exception as e:
-        return (None, None, _sam2_state_init(0), _sam2_state_init(1), str(e))
+        return (None, None, _sam2_state_init(0), _sam2_state_init(1),
+                str(e), empty_slider, empty_slider)
     state = PipelineState.load(ws)
     ud = state.steps.get("undistort")
     if ud is None or ud.status != "done":
         return (None, None, _sam2_state_init(0), _sam2_state_init(1),
-                "Step 1 (undistort) 没完成, 先跑去畸变.")
+                "Step 1 (undistort) 没完成, 先跑去畸变.",
+                empty_slider, empty_slider)
     undist_root = Path(ud.outputs["undist_root"])
     capture_id = ud.outputs["capture_id"]
-    out_imgs, out_states, errs = [], [], []
+    out_imgs, out_states, out_sliders, errs = [], [], [], []
     for ci in (0, 1):
-        d = undist_root / capture_id / str(ci) / "images_undistorted"
-        first = next(iter(sorted(d.glob("*.jpg"))), None)
-        if first is None:
-            errs.append(f"cam{ci}: 找不到首帧 (在 {d})")
+        rgb, n_frames, _ = _sam2_load_cam_frame(undist_root, capture_id, ci, 0)
+        if rgb is None:
+            errs.append(f"cam{ci}: 找不到任何首帧 jpg")
             out_imgs.append(None)
             out_states.append(_sam2_state_init(ci))
+            out_sliders.append(empty_slider)
             continue
-        bgr = cv2.imread(str(first))
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) if bgr is not None else None
         s = _sam2_state_init(ci)
         s["image"] = rgb
+        s["frame_idx"] = 0
+        s["n_frames"] = n_frames
         # heavy: 给 SAM2 image predictor 喂图
         reset_cam(ci)
-        if rgb is not None:
-            try:
-                set_image_for_cam(ci, rgb)
-            except Exception as e:
-                errs.append(f"cam{ci} set_image fail: {e}")
-                print(f"[sam2 interactive] cam{ci} set_image fail: {e}")
+        try:
+            set_image_for_cam(ci, rgb)
+        except Exception as e:
+            errs.append(f"cam{ci} set_image fail: {e}")
+            print(f"[sam2 interactive] cam{ci} set_image fail: {e}")
         out_imgs.append(rgb)
         out_states.append(s)
+        # Gradio 要求 max > min, n_frames < 2 时用 1 占位 (slider 拖不动)
+        out_sliders.append(gr.Slider(minimum=0, maximum=max(n_frames - 1, 1),
+                                       value=0, step=1,
+                                       label=f"anchor frame (cam{ci}) — 拖到你想标的帧 (共 {n_frames} 帧)"))
     if errs:
-        msg = "⚠️ 加载部分失败 (第一次点击会自动补 set_image 重试):\n- " + "\n- ".join(errs)
+        msg = ("⚠️ 加载部分失败 (第一次点击会自动补 set_image 重试):\n- "
+               + "\n- ".join(errs))
     else:
-        msg = "✅ 已加载 cam0/cam1 首帧 + SAM2 image predictor, 可以开始点了."
-    return out_imgs[0], out_imgs[1], out_states[0], out_states[1], msg
+        msg = ("✅ 已加载 cam0/cam1 首帧 + SAM2 image predictor. "
+               "可以拖 anchor frame slider 换到任意一帧再开始点.")
+    return (out_imgs[0], out_imgs[1], out_states[0], out_states[1], msg,
+            out_sliders[0], out_sliders[1])
+
+
+def cb_sam2_browse_frame(state: dict, frame_idx, active_label: str):
+    """切到另一帧: 只换 image + frame_idx, **保留所有已存的 anchor**.
+    给 SAM2 image predictor 重新喂这一帧的图, 这样在这帧上点击加点时
+    predict_hand_mask 用的是新帧的 features."""
+    from pipeline.sam2_interactive import set_image_for_cam
+    if state is None or state.get("ci") is None:
+        return (state.get("image") if state else None), state
+    ci = state["ci"]
+    try:
+        ws = _ws_or_raise()
+    except Exception as e:
+        print(f"[sam2] browse_frame: 无 workspace: {e}")
+        return state.get("image"), state
+    pst = PipelineState.load(ws)
+    ud = pst.steps.get("undistort")
+    if ud is None or ud.status != "done":
+        return state.get("image"), state
+    undist_root = Path(ud.outputs["undist_root"])
+    capture_id = ud.outputs["capture_id"]
+    rgb, n_frames, _ = _sam2_load_cam_frame(undist_root, capture_id, ci,
+                                              int(frame_idx))
+    if rgb is None:
+        return state.get("image"), state
+    state["image"] = rgb
+    state["frame_idx"] = max(0, min(int(frame_idx), n_frames - 1))
+    state["n_frames"] = n_frames
+    # anchors 不动 — 多帧标注靠这个 dict 跨帧持久化
+    try:
+        set_image_for_cam(ci, rgb)
+    except Exception as e:
+        print(f"[sam2 interactive] cam{ci} set_image fail (browse): {e}")
+    return _sam2_render(state, active_label), state
 
 
 def cb_sam2_click(evt: gr.SelectData, state: dict, active_label: str):
@@ -337,23 +547,39 @@ def cb_sam2_click(evt: gr.SelectData, state: dict, active_label: str):
         return (state.get("image") if state else None), state
     x, y = evt.index
     hand, typ = active_label.split("_")
-    state[hand][typ].append([float(x), float(y)])
-    # 即时重算这只手的 mask
+    fi = state.get("frame_idx", 0)
+    anchor = _sam2_get_anchor(state, fi)
+    anchor[hand][typ].append([float(x), float(y)])
+    # 即时重算这只手在该 frame 的 mask
     _sam2_recompute_mask(state, hand)
-    return _sam2_render(state), state
+    return _sam2_render(state, active_label), state
 
 
-def cb_sam2_clear(state: dict):
-    """清掉这个 cam 的所有标点 + mask, 保留 image 和 ci."""
-    img = state.get("image") if state else None
-    ci = state.get("ci") if state else None
-    s = _sam2_state_init(ci)
-    s["image"] = img
-    return _sam2_render(s), s
+def cb_sam2_clear_this_frame(state: dict, active_label: str):
+    """清掉当前 frame 的 anchor (不影响其他帧)."""
+    if state is None:
+        return None, state
+    fi = state.get("frame_idx", 0)
+    state.get("anchors", {}).pop(fi, None)
+    return _sam2_render(state, active_label), state
+
+
+def cb_sam2_clear_all_anchors(state: dict, active_label: str):
+    """清掉这个 cam 的所有 anchor (全部帧)."""
+    if state is None:
+        return None, state
+    state["anchors"] = {}
+    return _sam2_render(state, active_label), state
+
+
+def cb_sam2_active_change(state: dict, active_label: str):
+    """切换 active label radio 时, 重渲染图 (隐藏掉非 active 那只手)."""
+    return _sam2_render(state, active_label)
 
 
 def cb_detect(backend: str, force: bool,
               ann0: dict, ann1: dict,
+              bbox_size: float = 1.0,
               progress=gr.Progress(track_tqdm=False)):
     ws = _ws_or_raise()
     def _p(frac, msg):
@@ -361,33 +587,45 @@ def cb_detect(backend: str, force: bool,
 
     sam2_prompts = None
     if backend == "sam2":
-        sam2_prompts = {
-            str(ci): {
-                "right": {"pos": (ann or {}).get("right", {}).get("pos", []),
-                          "neg": (ann or {}).get("right", {}).get("neg", [])},
-                "left":  {"pos": (ann or {}).get("left", {}).get("pos", []),
-                          "neg": (ann or {}).get("left", {}).get("neg", [])},
-            }
-            for ci, ann in ((0, ann0), (1, ann1))
-        }
-        # 至少给一个 cam 一只手有正点
+        def _pack(ann):
+            anchors_raw = (ann or {}).get("anchors", {}) or {}
+            out_anchors = {}
+            for fi, fd in anchors_raw.items():
+                out_anchors[int(fi)] = {
+                    hand: {
+                        "pos": list((fd.get(hand) or {}).get("pos") or []),
+                        "neg": list((fd.get(hand) or {}).get("neg") or []),
+                    }
+                    for hand in ("right", "left")
+                }
+            return {"anchors": out_anchors}
+        sam2_prompts = {str(ci): _pack(ann)
+                         for ci, ann in ((0, ann0), (1, ann1))}
         any_pos = any(
-            sam2_prompts[c][h]["pos"]
-            for c in ("0", "1") for h in ("right", "left")
+            sam2_prompts[c]["anchors"][fi][h]["pos"]
+            for c in ("0", "1")
+            for fi in sam2_prompts[c]["anchors"]
+            for h in ("right", "left")
         )
         if not any_pos:
-            return ({"error": "SAM2 需要在首帧给手标至少一个正样本点"},
+            return ({"error": "SAM2 需要在任意 cam 的任意一帧给一只手标 ≥1 个正点"},
                     _status_md(), None, None, "")
     try:
         info = step2_detect.run(ws, progress=_p, force=force,
-                                 backend=backend, sam2_prompts=sam2_prompts)
+                                 backend=backend, sam2_prompts=sam2_prompts,
+                                 bbox_size=float(bbox_size))
         ctx.state = PipelineState.load(ws)
         vv = info.get("vis_videos") or {}
+        ud_o = ctx.state.steps.get("undistort").outputs
+        frame_max = _ud_slider_max(ud_o)
         return (info, _status_md(),
-                _existing(vv.get("0")), _existing(vv.get("1")), "")
+                _existing(vv.get("0")), _existing(vv.get("1")), "",
+                gr.Slider(minimum=0, maximum=frame_max, value=0, step=1),
+                _det_frame_image(0, 0), _det_frame_image(1, 0))
     except Exception as e:
         return ({"error": str(e)}, _status_md(),
-                None, None, traceback.format_exc())
+                None, None, traceback.format_exc(),
+                gr.Slider(), None, None)
 
 
 def cb_pseudo(backend: str, force: bool, make_video: bool,
@@ -400,9 +638,14 @@ def cb_pseudo(backend: str, force: bool, make_video: bool,
                                        make_video=make_video,
                                        backend=backend)
         ctx.state = PipelineState.load(ws)
-        return info, _status_md(), info.get("pseudo_overlay_mp4"), ""
+        ud_o = ctx.state.steps.get("undistort").outputs
+        frame_max = _ud_slider_max(ud_o)
+        return (info, _status_md(), info.get("pseudo_overlay_mp4"), "",
+                gr.Slider(minimum=0, maximum=frame_max, value=0, step=1),
+                _ps_frame_image(0))
     except Exception as e:
-        return {"error": str(e)}, _status_md(), None, traceback.format_exc()
+        return ({"error": str(e)}, _status_md(), None,
+                traceback.format_exc(), gr.Slider(), None)
 
 
 def cb_finetune(enable: bool, epochs: int, lr: float, bs: int):
@@ -429,12 +672,17 @@ def cb_infer(ckpt_choice: str):
                                   ckpt_choice == _DEFAULT_CKPT_LABEL) else ckpt_choice
         info = step5_inference.run(ws, ckpt_override=ckpt_override)
         ctx.state = PipelineState.load(ws)
+        ud_o = ctx.state.steps.get("undistort").outputs
+        frame_max = _ud_slider_max(ud_o)
         return (info, _status_md(),
                 info.get("hand0_mp4"), info.get("hand1_mp4"),
-                info.get("npy_path"), "")
+                info.get("npy_path"), "",
+                gr.Slider(minimum=0, maximum=frame_max, value=0, step=1),
+                _inf_frame_image(0, 0), _inf_frame_image(1, 0))
     except Exception as e:
         return ({"error": str(e)}, _status_md(),
-                None, None, None, traceback.format_exc())
+                None, None, None, traceback.format_exc(),
+                gr.Slider(), None, None)
 
 
 def cb_refresh_ckpts():
@@ -515,13 +763,15 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Group(visible=False) as sam2_panel:
                     gr.Markdown(
-                        "**SAM2 标注流程**: 点 **Load first frames** 拉首帧 + 加载 SAM2 (~5-10s) → "
-                        "选 **当前点类型** (右手正 / 右手负 / 左手正 / 左手负) → "
-                        "在图上点击加点 (每点击一次即时看到这只手的 mask, 觉得不准可以继续加点) → "
-                        "点 **Run hand detection** 进入序列分割.\n\n"
+                        "**SAM2 多 anchor 标注流程**: "
+                        "点 **Load first frames** 加载 SAM2 (~5-10s) → "
+                        "拖 **frame slider** 到任意一帧 → 选 **当前点类型** → 点击加点 (即时看到该帧的 mask) → "
+                        "**再拖到别的帧**继续标 (anchor 跨帧持久化, 不会丢) → "
+                        "在多个帧 (比如开局 / 中段 / 末段) 都标几个正负样本之后, "
+                        "点 **Run hand detection** → SAM2 把所有 anchor 当作 memory, **从 frame 0 一口气 propagate 到末尾**, 整段视频都有 bbox.\n\n"
                         "**点颜色**: 绿=右手正, 红=右手负, 蓝=左手正, 紫=左手负. "
                         "**mask**: 绿色半透明=右手, 蓝色半透明=左手.\n"
-                        "**约束**: 每个 cam 至少给一只手 ≥1 个正点."
+                        "**约束**: 至少在一帧上, 一只手有 ≥1 个正点."
                     )
                     with gr.Row():
                         btn_sam2_load = gr.Button("Load first frames", variant="secondary")
@@ -529,57 +779,103 @@ def build_ui() -> gr.Blocks:
 
                     # cam0 板块 (整个一行宽, 大图)
                     gr.Markdown("### cam0")
+                    ann_frame0 = gr.Slider(
+                        minimum=0, maximum=1, value=0, step=1,
+                        label="frame (cam0) — 在多个帧上标 anchor (Load 后会更新到真实帧数)")
                     with gr.Row():
                         ann_active0 = gr.Radio(
                             choices=list(_SAM2_LABELS),
                             value="right_pos",
                             label="当前点类型 (cam0)",
-                            scale=2)
-                        btn_clear0 = gr.Button("Clear cam0 points", scale=1)
-                    ann_img0 = gr.Image(label="cam0 first frame (点击加点)",
+                            scale=3)
+                        btn_clear_this0 = gr.Button("Clear this frame", scale=1)
+                        btn_clear_all0 = gr.Button("Clear ALL anchors (cam0)", scale=1)
+                    ann_img0 = gr.Image(label="cam0 current frame (点击加点)",
                                           interactive=False, height=700)
 
                     # cam1 板块
                     gr.Markdown("### cam1")
+                    ann_frame1 = gr.Slider(
+                        minimum=0, maximum=1, value=0, step=1,
+                        label="frame (cam1) — 在多个帧上标 anchor (Load 后会更新到真实帧数)")
                     with gr.Row():
                         ann_active1 = gr.Radio(
                             choices=list(_SAM2_LABELS),
                             value="right_pos",
                             label="当前点类型 (cam1)",
-                            scale=2)
-                        btn_clear1 = gr.Button("Clear cam1 points", scale=1)
-                    ann_img1 = gr.Image(label="cam1 first frame (点击加点)",
+                            scale=3)
+                        btn_clear_this1 = gr.Button("Clear this frame", scale=1)
+                        btn_clear_all1 = gr.Button("Clear ALL anchors (cam1)", scale=1)
+                    ann_img1 = gr.Image(label="cam1 current frame (点击加点)",
                                           interactive=False, height=700)
 
                     btn_sam2_load.click(
                         cb_sam2_load_frames, [],
-                        [ann_img0, ann_img1, ann_state0, ann_state1, sam2_log])
+                        [ann_img0, ann_img1, ann_state0, ann_state1, sam2_log,
+                         ann_frame0, ann_frame1])
+                    # slider 用 .release: 只在用户松开鼠标时触发, 避免拖动过程中频繁切帧
+                    ann_frame0.release(cb_sam2_browse_frame,
+                                         [ann_state0, ann_frame0, ann_active0],
+                                         [ann_img0, ann_state0])
+                    ann_frame1.release(cb_sam2_browse_frame,
+                                         [ann_state1, ann_frame1, ann_active1],
+                                         [ann_img1, ann_state1])
                     ann_img0.select(cb_sam2_click,
                                      [ann_state0, ann_active0],
                                      [ann_img0, ann_state0])
                     ann_img1.select(cb_sam2_click,
                                      [ann_state1, ann_active1],
                                      [ann_img1, ann_state1])
-                    btn_clear0.click(cb_sam2_clear, [ann_state0],
-                                       [ann_img0, ann_state0])
-                    btn_clear1.click(cb_sam2_clear, [ann_state1],
-                                       [ann_img1, ann_state1])
+                    btn_clear_this0.click(cb_sam2_clear_this_frame,
+                                            [ann_state0, ann_active0],
+                                            [ann_img0, ann_state0])
+                    btn_clear_this1.click(cb_sam2_clear_this_frame,
+                                            [ann_state1, ann_active1],
+                                            [ann_img1, ann_state1])
+                    btn_clear_all0.click(cb_sam2_clear_all_anchors,
+                                            [ann_state0, ann_active0],
+                                            [ann_img0, ann_state0])
+                    btn_clear_all1.click(cb_sam2_clear_all_anchors,
+                                            [ann_state1, ann_active1],
+                                            [ann_img1, ann_state1])
+                    # 切 active label 时重渲染图 (隐藏掉非 active 那只手的点/mask)
+                    ann_active0.change(cb_sam2_active_change,
+                                         [ann_state0, ann_active0], [ann_img0])
+                    ann_active1.change(cb_sam2_active_change,
+                                         [ann_state1, ann_active1], [ann_img1])
 
                 def _toggle_sam2(b):
                     return gr.update(visible=(b == "sam2"))
                 det_backend.change(_toggle_sam2, [det_backend], [sam2_panel])
 
                 det_force = gr.Checkbox(label="Force re-detect (重跑全部帧)")
+                det_bbox_size = gr.Number(
+                    value=1.0, precision=2, step=0.1,
+                    label="bbox patch (=1 不扩, 1.5 中心不变宽高各 ×1.5, 通常 1.0~2.0)",
+                    info="给检测出的 bbox 加 padding. 1.0 = 紧 bbox; 改了要勾 Force re-run 才生效.")
                 btn_det = gr.Button("Run hand detection", variant="primary")
                 out_det = gr.JSON(label="Detection summary")
                 with gr.Row():
-                    preview_det0 = gr.Video(label="cam0 bbox overlay mp4")
-                    preview_det1 = gr.Video(label="cam1 bbox overlay mp4")
+                    preview_det0 = gr.Video(label="cam0 bbox overlay mp4 (60fps)")
+                    preview_det1 = gr.Video(label="cam1 bbox overlay mp4 (60fps)")
+                # ── 单帧浏览 ───────────────────────────────────
+                gr.Markdown("**单帧浏览** — 拖动看任意帧的 bbox")
+                det_frame = gr.Slider(minimum=0, maximum=1, value=0, step=1,
+                                       label="frame index")
+                with gr.Row():
+                    det_img0 = gr.Image(label="cam0 single frame",
+                                         interactive=False, height=400)
+                    det_img1 = gr.Image(label="cam1 single frame",
+                                         interactive=False, height=400)
+                det_frame.change(cb_det_browse, [det_frame],
+                                  [det_img0, det_img1])
                 log_det = gr.Code(label="Error / Traceback", language="markdown")
                 btn_det.click(cb_detect,
-                              [det_backend, det_force, ann_state0, ann_state1],
+                              [det_backend, det_force,
+                               ann_state0, ann_state1, det_bbox_size],
                               [out_det, status_box,
-                               preview_det0, preview_det1, log_det])
+                               preview_det0, preview_det1, log_det,
+                               det_frame, det_img0, det_img1])
 
             # ── Step 3: Pseudo Label (HaMER / WiLoR) ──────────────
             with gr.Tab("3. Pseudo Label"):
@@ -592,10 +888,18 @@ def build_ui() -> gr.Blocks:
                                       value=True)
                 btn_ps = gr.Button("Generate pseudo labels", variant="primary")
                 out_ps = gr.JSON(label="Pseudo label summary")
-                preview_ps = gr.Video(label="_pseudo_vis 全帧 overlay mp4")
+                preview_ps = gr.Video(label="_pseudo_vis 全帧 overlay mp4 (60fps)")
+                # ── 单帧浏览 ───────────────────────────────────
+                gr.Markdown("**单帧浏览** — 拖动看任意帧的 21 关节伪标 (cam0 | cam1)")
+                ps_frame = gr.Slider(minimum=0, maximum=1, value=0, step=1,
+                                      label="frame index")
+                ps_img = gr.Image(label="pseudo label single frame",
+                                    interactive=False, height=400)
+                ps_frame.change(cb_ps_browse, [ps_frame], [ps_img])
                 log_ps = gr.Code(label="Error / Traceback", language="markdown")
                 btn_ps.click(cb_pseudo, [ps_backend, ps_force, ps_mp4],
-                             [out_ps, status_box, preview_ps, log_ps])
+                             [out_ps, status_box, preview_ps, log_ps,
+                              ps_frame, ps_img])
 
             # ── Step 4: Finetune ──────────────────────────────────
             with gr.Tab("4. Self-supervised Finetune (optional)"):
@@ -626,14 +930,26 @@ def build_ui() -> gr.Blocks:
                                     variant="primary")
                 out_in = gr.JSON(label="Inference result")
                 with gr.Row():
-                    preview_h0 = gr.Video(label="hand0 2D overlay (right)")
-                    preview_h1 = gr.Video(label="hand1 2D overlay (left)")
+                    preview_h0 = gr.Video(label="hand0 2D overlay (right, 60fps)")
+                    preview_h1 = gr.Video(label="hand1 2D overlay (left, 60fps)")
+                # ── 单帧浏览 ───────────────────────────────────
+                gr.Markdown("**单帧浏览** — 拖动看任意帧的双手 3D 投影 (cam0 | cam1 拼接)")
+                inf_frame = gr.Slider(minimum=0, maximum=1, value=0, step=1,
+                                       label="frame index")
+                with gr.Row():
+                    inf_img0 = gr.Image(label="hand0 (right) single frame",
+                                          interactive=False, height=400)
+                    inf_img1 = gr.Image(label="hand1 (left) single frame",
+                                          interactive=False, height=400)
+                inf_frame.change(cb_inf_browse, [inf_frame],
+                                  [inf_img0, inf_img1])
                 npy_file = gr.File(label="下载 npy")
                 log_in = gr.Code(label="Error / Traceback", language="markdown")
                 btn_refresh_ckpt.click(cb_refresh_ckpts, [], [ckpt_dd])
                 btn_in.click(cb_infer, [ckpt_dd],
                              [out_in, status_box, preview_h0, preview_h1,
-                              npy_file, log_in])
+                              npy_file, log_in,
+                              inf_frame, inf_img0, inf_img1])
 
             # ── Step 6: Visualization (way_vis) ────────────────────
             with gr.Tab("6. 3D Visualization (way_vis)"):
@@ -660,10 +976,11 @@ def build_ui() -> gr.Blocks:
             cb_setup, [cap_dir, seq, auto_raw],
             [out_setup, status_box, log_setup,
              out_ud, ud_frame, preview_ud0, preview_ud1,
-             out_det, preview_det0, preview_det1,
-             out_ps, preview_ps,
+             out_det, preview_det0, preview_det1, det_frame, det_img0, det_img1,
+             out_ps, preview_ps, ps_frame, ps_img,
              out_ft,
              out_in, preview_h0, preview_h1, npy_file,
+                inf_frame, inf_img0, inf_img1,
              out_vis, preview_v0, preview_v1,
              ckpt_dd],
         )

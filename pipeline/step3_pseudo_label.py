@@ -77,45 +77,54 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
     n_ok = {str(ci): 0 for ci in range(n_cams)}
     n_skip = 0
 
-    for ci_str, frame_dict in bbox_data.items():
-        ci = int(ci_str)
-        K = Ks[ci]
-        img_dir = undist_root / capture_id / ci_str / "images_undistorted"
-        for fid_str, bboxes in sorted(frame_dict.items()):
-            try:
-                fid = int(fid_str)
-            except ValueError:
-                continue
-            img_path = img_dir / f"{fid:06d}.jpg"
-            image = cv2.imread(str(img_path))
-            if image is None:
-                continue
-            seen = set()
-            for entry in bboxes:
-                if not entry or len(entry) < 2:
+    try:
+        for ci_str, frame_dict in bbox_data.items():
+            ci = int(ci_str)
+            K = Ks[ci]
+            img_dir = undist_root / capture_id / ci_str / "images_undistorted"
+            for fid_str, bboxes in sorted(frame_dict.items()):
+                try:
+                    fid = int(fid_str)
+                except ValueError:
                     continue
-                hand_label = entry[0]
-                if hand_label not in ("right", "left") or hand_label in seen:
+                img_path = img_dir / f"{fid:06d}.jpg"
+                image = cv2.imread(str(img_path))
+                if image is None:
                     continue
-                seen.add(hand_label)
-                hid = 0 if hand_label == "right" else 1
-                p = out_dir / f"{capture_id}_{ci}_{fid}_{hid}.npz"
-                processed += 1
-                if p.exists() and not force:
-                    n_skip += 1
-                    continue
-                kp2d = estimator.estimate_2d(image, hand_label, entry[1], K)
-                if kp2d is None:
-                    continue
-                np.savez(p,
-                         is_right=np.array([1.0 if hid == 0 else 0.0],
-                                           dtype=np.float32),
-                         joints_2d=kp2d)
-                n_ok[str(ci)] += 1
-                if progress and processed % 20 == 0:
-                    progress(processed / max(total_hands, 1),
-                             f"{backend}  cam{ci} f{fid:06d} {hand_label}"
-                             f"  ({processed}/{total_hands}, skip={n_skip})")
+                seen = set()
+                for entry in bboxes:
+                    if not entry or len(entry) < 2:
+                        continue
+                    hand_label = entry[0]
+                    if hand_label not in ("right", "left") or hand_label in seen:
+                        continue
+                    seen.add(hand_label)
+                    hid = 0 if hand_label == "right" else 1
+                    p = out_dir / f"{capture_id}_{ci}_{fid}_{hid}.npz"
+                    processed += 1
+                    if p.exists() and not force:
+                        n_skip += 1
+                        continue
+                    kp2d = estimator.estimate_2d(image, hand_label, entry[1], K)
+                    if kp2d is None:
+                        continue
+                    np.savez(p,
+                             is_right=np.array([1.0 if hid == 0 else 0.0],
+                                               dtype=np.float32),
+                             joints_2d=kp2d)
+                    n_ok[str(ci)] += 1
+                    if progress and processed % 20 == 0:
+                        progress(processed / max(total_hands, 1),
+                                 f"{backend}  cam{ci} f{fid:06d} {hand_label}"
+                                 f"  ({processed}/{total_hands}, skip={n_skip})")
+    finally:
+        # 释放伪标后端 (HaMER / WiLoR) 占的显存, 不让它一直挂着,
+        # step4 FT / step5 inference 会跟它抢同一张物理 GPU.
+        try:
+            estimator.release()
+        except Exception as e:
+            print(f"[step3] estimator.release fail (忽略): {e}")
+        estimator = None
 
     # 生成可视化视频 + 每帧 jpg (拼 cam0|cam1)
     video_path: Optional[str] = None
@@ -134,7 +143,7 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
             out_path = make_pseudo_video(
                 undist_root, capture_id, cam_names, cam_idx_of,
                 total_frames, frame_dirs_undist,
-                fps=10, downscale=2, save_per_frame_jpg=True,
+                fps=60, downscale=2, save_per_frame_jpg=True,
             )
             video_path = str(out_path) if out_path else None
         except Exception as e:

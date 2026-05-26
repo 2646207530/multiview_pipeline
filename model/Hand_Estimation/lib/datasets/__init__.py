@@ -3,6 +3,7 @@ from lib.utils.config import CN
 from ..utils.builder import build_dataset
 from .golf import GolfDataset,GolfMultiViewTempo,GolfDatasetMultiView
 from .golfInfra_dataset import GolfInfraDataset,GolfInfraMultiViewTempo
+from .golf_flip import FlipDataset,FlipMultiViewTempo
 
 
 

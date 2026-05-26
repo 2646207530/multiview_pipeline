@@ -19,4 +19,5 @@ from .layers.ptEmb_transformer import PtEmbedTRv2, PtEmbedTRv5
 # from .NewModel_Dex import NewMultiviewStereo
 # from .NewModel_MVT import NewMultiviewStere
 from .TestModel import TestMultiviewStereo
+from .FlipModel import TestFlipMultiviewStereo
 # from .RLE import RegressFlow

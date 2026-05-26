@@ -43,5 +43,13 @@ def load_hamer(checkpoint_path=DEFAULT_CHECKPOINT):
         model_cfg.freeze()
     # print('model_cfg:',model_cfg)
     # 使用传入的 checkpoint_path，不再覆盖为绝对路径
-    model = HAMER.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg)
+    # map_location='cpu': 先把 ckpt tensors 反序列化到 CPU, 避开 torch.load 里
+    # 对原 ckpt 设备 (cuda:N) 的强制初始化. caller 再 .to(device) 自己挪到 GPU.
+    # 否则在 CUDA_VISIBLE_DEVICES 已经设过但还没显式 torch.cuda.init 的场景下,
+    # torch.load 会调 _cuda_init 时拿到 "No CUDA GPUs are available".
+    import torch
+    model = HAMER.load_from_checkpoint(
+        checkpoint_path, strict=False, cfg=model_cfg,
+        map_location=torch.device('cpu'),
+    )
     return model, model_cfg

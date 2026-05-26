@@ -74,6 +74,23 @@ class PseudoBackend:
                     K: np.ndarray) -> Optional[np.ndarray]:
         raise NotImplementedError
 
+    def release(self) -> None:
+        """子类用来清掉自己持有的 nn.Module + 空 CUDA cache.
+        基类默认行为: 把所有看起来像 model 的 attr 都 del 掉, 然后 empty_cache."""
+        import gc
+        for attr in list(vars(self).keys()):
+            try:
+                delattr(self, attr)
+            except Exception:
+                pass
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
 
 class _HamerBackend(PseudoBackend):
     name = "hamer"

@@ -98,7 +98,6 @@ def get_rendered_frame_at_t(batch, preds, t_idx):
     pred_proj_2d = pred_proj_2d.reshape(B, T, N, 21, 2)
 
     image_paths = flatten_strings(batch['image_path'])
-    affines = batch['affine'].reshape(B, T, N, -1, 3).cpu().numpy()
 
     view_images = []
     for view_id in range(N):
@@ -110,19 +109,14 @@ def get_rendered_frame_at_t(batch, preds, t_idx):
             logger.warning(f"Could not read image: {path}")
             continue
 
-        pts_crop = pred_proj_2d[0, t_idx, view_id].detach().cpu().numpy()
-
-        affine = affines[0, t_idx, view_id]
-        A = np.eye(3)
-        A[:2, :] = affine[:2, :]
-        A_inv = np.linalg.inv(A)
-
-        pts_crop_homo = np.concatenate([pts_crop, np.ones((21, 1))], axis=1)
-        pts_orig = np.dot(A_inv, pts_crop_homo.T).T[:, :2]
-
-        if hand_id == 1:
-            img_width = img_bgr.shape[1]
-            pts_orig[:, 0] = img_width - pts_orig[:, 0]
+        # FlipModel 约定:
+        #   * target_cam_intr 是 ORIGINAL 全图 K (不是 crop 后的); 所以
+        #     master_joints_mvf 经 K + T_c2m 投出来直接就是原图坐标, 不用 A_inv.
+        #   * 左手 (hand_id == 1) 的 joints 已经被 flip_head 内部用 is_left flag
+        #     翻回真实 (非镜像) 坐标系, 所以不能再手动 width - x 镜像.
+        #   旧 TestModel 时期 target_cam_intr 是 crop K + 左手输出在镜像系, 才
+        #   需要 A_inv 和 width-x; 切到 FlipModel 后那两步都是双重操作.
+        pts_orig = pred_proj_2d[0, t_idx, view_id].detach().cpu().numpy()
 
         draw_hand_skeleton(img_bgr, pts_orig)
         view_images.append(img_bgr)
@@ -394,7 +388,7 @@ def main_worker(cfg: CN, arg: Namespace):
             if video_writer is None:
                 h, w, _ = img.shape
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                video_writer = cv2.VideoWriter(video_path, fourcc, 10.0, (w, h))
+                video_writer = cv2.VideoWriter(video_path, fourcc, 60.0, (w, h))
 
             video_writer.write(img)
 
@@ -425,11 +419,21 @@ if __name__ == "__main__":
                 logger.error(f"Invalid gpu_id format: {arg.gpu_id}. Use comma-separated integers like '0' or '0,1'.")
                 arg.gpu_id = "0"
 
-            os.environ["CUDA_VISIBLE_DEVICES"] = arg.gpu_id
-            logger.info(f"Using GPU(s): {arg.gpu_id}")
+            # 只在父环境没设过 CUDA_VISIBLE_DEVICES 时才覆写, 否则会把
+            # `CUDA_VISIBLE_DEVICES=2 python app.py` 这种限制 silent 丢掉.
+            if "CUDA_VISIBLE_DEVICES" not in os.environ:
+                os.environ["CUDA_VISIBLE_DEVICES"] = arg.gpu_id
+            logger.info(
+                f"--gpu_id={arg.gpu_id}, env CUDA_VISIBLE_DEVICES="
+                f"{os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}"
+            )
         else:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-            logger.info("No GPU ID specified, defaulting to GPU 0")
+            if "CUDA_VISIBLE_DEVICES" not in os.environ:
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            logger.info(
+                "No --gpu_id, env CUDA_VISIBLE_DEVICES="
+                f"{os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}"
+            )
 
         arg.device = "cuda"
         arg.n_gpus = torch.cuda.device_count()

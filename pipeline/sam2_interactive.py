@@ -12,7 +12,29 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
+
+
+def keep_largest_cc(mask: np.ndarray) -> np.ndarray:
+    """只保留最大连通区域, 抹掉 SAM2 偶尔吐在远处的几个杂散像素.
+
+    这种杂点肉眼不易察觉, 但会把 bbox 撑得很大 (因为 bbox = nonzero 的
+    xmin/ymin/xmax/ymax). 必须在跑 bbox 之前清掉, 否则 detections.json 全错.
+    输入 (H,W) bool; 输出 (H,W) bool. 空 mask 原样返回."""
+    if mask is None:
+        return mask
+    if mask.dtype == np.bool_:
+        m = mask.astype(np.uint8)
+    else:
+        m = (mask > 0).astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if num <= 1:  # 只有背景 / 没东西
+        return mask.astype(bool) if mask.dtype != np.bool_ else mask
+    # stats[0] 是背景; 在 1..num-1 里挑面积最大的那块
+    sizes = stats[1:, cv2.CC_STAT_AREA]
+    largest = 1 + int(np.argmax(sizes))
+    return labels == largest
 
 _PROJECT = Path(__file__).resolve().parent.parent
 _CKPT = _PROJECT / "model" / "sam2" / "checkpoints" / "sam2.1_hiera_large.pt"
@@ -81,12 +103,24 @@ def _ensure_model():
     return _MODEL
 
 
+def _sam2_autocast():
+    """SAM2 官方推荐 autocast bfloat16; 不加的话 image_predictor 和 video
+    predictor 都会在 memory/cross-attn 处 hit 'BFloat16 vs Float' dtype 错."""
+    import torch
+    if torch.cuda.is_available():
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    # CPU 时返回个 no-op 上下文
+    import contextlib
+    return contextlib.nullcontext()
+
+
 def set_image_for_cam(ci: int, image_rgb: np.ndarray) -> None:
     """把 cam ci 的当前帧喂给对应的 image predictor (heavy, 调一次)."""
     _, SAM2ImagePredictor = _import_sam2_with_shadow_bypass()
     if ci not in _PREDICTORS:
         _PREDICTORS[ci] = SAM2ImagePredictor(_ensure_model())
-    _PREDICTORS[ci].set_image(image_rgb)
+    with _sam2_autocast():
+        _PREDICTORS[ci].set_image(image_rgb)
 
 
 def predict_hand_mask(ci: int,
@@ -112,12 +146,13 @@ def predict_hand_mask(ci: int,
         predictor = _PREDICTORS[ci]
     pts = np.array(pos + neg, dtype=np.float32)
     lbls = np.array([1] * len(pos) + [0] * len(neg), dtype=np.int32)
-    masks, _scores, _logits = predictor.predict(
-        point_coords=pts, point_labels=lbls, multimask_output=False,
-    )
+    with _sam2_autocast():
+        masks, _scores, _logits = predictor.predict(
+            point_coords=pts, point_labels=lbls, multimask_output=False,
+        )
     if masks is None or len(masks) == 0:
         return None
-    return masks[0].astype(bool)
+    return keep_largest_cc(masks[0])
 
 
 def reset_cam(ci: int) -> None:

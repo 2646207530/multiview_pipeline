@@ -60,7 +60,7 @@ def _draw_overlay(img: np.ndarray, bboxes: List[list]) -> np.ndarray:
 def _write_overlay_video(cam_dir: Path,
                           bbox_for_cam: Dict[str, list],
                           out_mp4: Path,
-                          fps: int = 30) -> Optional[str]:
+                          fps: int = 60) -> Optional[str]:
     """对一个相机文件夹的所有 frame_*.jpg 顺序拼成 overlay mp4."""
     jpgs = sorted(cam_dir.glob("*.jpg"))
     if not jpgs:
@@ -84,9 +84,52 @@ def _write_overlay_video(cam_dir: Path,
     return str(out_mp4) if out_mp4.exists() else None
 
 
+def _expand_bbox(bbox, scale: float, img_w: int, img_h: int):
+    """以中心不变, 长宽各乘 scale, clip 到 [0, W/H]."""
+    x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    w = (x2 - x1) * scale
+    h = (y2 - y1) * scale
+    nx1 = max(0.0,           cx - w / 2.0)
+    ny1 = max(0.0,           cy - h / 2.0)
+    nx2 = min(float(img_w),  cx + w / 2.0)
+    ny2 = min(float(img_h),  cy + h / 2.0)
+    return [nx1, ny1, nx2, ny2]
+
+
+def _expand_bbox_data(bbox_data: Dict[str, Dict[str, list]],
+                       scale: float, undist_root: Path, capture_id: str
+                       ) -> Dict[str, Dict[str, list]]:
+    """对 bbox_data 里所有 bbox 做 scale 扩张, clip 到原图尺寸."""
+    if scale == 1.0:
+        return bbox_data
+    # 用每个 cam 的第一帧 jpg 拿图像尺寸 (同一序列同 cam 所有帧同尺寸)
+    img_size_cache: Dict[str, tuple] = {}
+    for ci_str, frame_dict in bbox_data.items():
+        if not frame_dict:
+            continue
+        if ci_str not in img_size_cache:
+            cam_dir = undist_root / capture_id / ci_str / "images_undistorted"
+            first_jpg = next(iter(sorted(cam_dir.glob("*.jpg"))), None)
+            if first_jpg is None:
+                img_size_cache[ci_str] = (10**6, 10**6)  # no clip
+            else:
+                im = cv2.imread(str(first_jpg))
+                img_size_cache[ci_str] = (im.shape[1], im.shape[0]) if im is not None else (10**6, 10**6)
+        W, H = img_size_cache[ci_str]
+        for fid_str, bboxes in frame_dict.items():
+            for entry in bboxes:
+                if not entry or len(entry) < 2:
+                    continue
+                entry[1] = _expand_bbox(entry[1], scale, W, H)
+    return bbox_data
+
+
 def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
         force: bool = False, backend: str = "yolo",
-        sam2_prompts: Optional[dict] = None) -> Dict[str, Any]:
+        sam2_prompts: Optional[dict] = None,
+        bbox_size: float = 1.0) -> Dict[str, Any]:
     if backend not in VALID_BACKENDS:
         raise ValueError(f"backend 必须是 {VALID_BACKENDS} 之一, 收到 {backend!r}")
 
@@ -99,6 +142,8 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
     n_cams = len(undist.outputs["cam_names"])
 
     # 已存在的 detections.json + 不 force, 直接返回 (idempotent)
+    # NOTE: 这条 idempotent 路径用的是已经写过的 bbox_data, 不会再二次扩张;
+    #       想换 bbox_size 就勾上 Force re-run.
     if ws.detections_json.exists() and not force:
         bbox_data = json.loads(ws.detections_json.read_text())
     else:
@@ -110,6 +155,13 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
             progress=progress,
             prompts=sam2_prompts if backend == "sam2" else None,
         )
+
+        # 在写入 detections.json 之前统一加 patch (中心不变, w/h 各 * bbox_size, clip 到原图)
+        if bbox_size != 1.0:
+            if progress:
+                progress(0.98, f"expand bbox × {bbox_size:.2f} ...")
+            bbox_data = _expand_bbox_data(
+                bbox_data, float(bbox_size), undist_root, capture_id)
 
         ws.detections_json.parent.mkdir(parents=True, exist_ok=True)
         ws.detections_json.write_text(json.dumps(bbox_data, ensure_ascii=False))
@@ -140,6 +192,7 @@ def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
         # 保留 sample_preview 字段兼容前端; 指向 cam0 视频
         "sample_preview":    vis_videos.get("0"),
         "backend":           backend,
+        "bbox_size":         float(bbox_size),
     }
     state.mark_done("detect", **info)
     state.save(ws)

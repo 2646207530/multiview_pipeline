@@ -956,3 +956,261 @@ class mvf_head(BasePointEmbedHead):
         # results["coord_uv_mv"] = coord_uv
 
         return results
+
+
+@HEAD.register_module()
+class flip_head(BasePointEmbedHead):
+    def __init__(self, cfg: CN):
+        self.radius = cfg.RADIUS_SAMPLE
+        # self.njoints = cfg.N_JOINTS
+        self.nsample = cfg.get("N_SAMPLE", 21 * 20)
+        self.view_nums = cfg.get("VIEW_NUMS", 8)
+        self.pt_feat_dim = cfg.POINTS_FEAT_DIM  # 256
+        self.merge_mode = cfg.get("CAM_FEAT_MERGE", "attn")  # By default, attention
+        self.query_type = cfg.get("QUERY_TYPE", "UAM")
+        self.PETR_embedding = cfg.get("PETR_EMBEDDING", False)
+        self.parametric_output = cfg.TRANSFORMER.get("PARAMETRIC_OUTPUT", False)
+        self.transformer_center_idx = cfg.TRANSFORMER.get("TRANSFORMER_CENTER_IDX", 9)
+        super(flip_head, self).__init__(cfg)
+
+    def _build_head_module(self):
+        super(flip_head, self)._build_head_module()
+
+        # Network G
+        self.merge_net_feature = nn.ModuleList()
+        self.merge_net_feature.append(
+            nn.Sequential(nn.Linear(self.embed_dims, self.embed_dims), nn.ReLU(),
+                          nn.Linear(self.embed_dims, self.embed_dims // 2)))
+        self.merge_net_feature.append(
+            nn.Sequential(nn.Linear(self.embed_dims // 2, self.embed_dims // 2), nn.ReLU(),
+                          nn.Linear(self.embed_dims // 2, self.embed_dims)))
+        self.merge_net_query_feature = nn.ModuleList()
+
+        # Configuration for the merge net
+        self.merge_net_query_feature = nn.ModuleList()
+        self.merge_net_query_feature.append(
+            nn.Sequential(nn.Linear(self.embed_dims, self.embed_dims), nn.ReLU(),
+                          nn.Linear(self.embed_dims, self.embed_dims // 2)))
+        self.merge_net_query_feature.append(
+            nn.Sequential(nn.Linear(self.embed_dims // 2, self.embed_dims // 2), nn.ReLU(),
+                          nn.Linear(self.embed_dims // 2, self.embed_dims)))
+
+        self.layer_global_feat = nn.Linear(512, self.embed_dims)
+
+        # self.reference_mv_embed = nn.Linear(280, 256)
+
+        self.query_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims + 256 + 3, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.pt_feat_dim),
+        )
+
+        # Configuration for the query_feat_embedding
+        self.query_feat_embedding = nn.Embedding(799, self.pt_feat_dim)  # (799, 256)
+
+        # A mano layer for creating template mesh
+        self.mano_layer = ManoLayer(joint_rot_mode="axisang",
+                                    use_pca=False,
+                                    mano_assets_root="assets/mano_v1_2",
+                                    center_idx=self.transformer_center_idx,
+                                    flat_hand_mean=True)
+
+        self.view_embed = nn.Parameter(torch.zeros(1, self.view_nums, 1, self.embed_dims))
+        # self.temp_embed = nn.Parameter(torch.zeros(1, self.maxlen, 1, self.embed_dims))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.nsample, self.embed_dims))
+        trunc_normal_(self.view_embed, std=.02)
+        trunc_normal_(self.pos_embed, std=.02)
+
+        logger.info(f"{type(self).__name__} got query_type: {self.query_type}")
+        logger.warning(f"{type(self).__name__} build done")
+
+    def _str_custom_args(self):
+        str_ = super()._str_custom_args()
+        return str_ + ", " + f"agg_merge_mode: {self.merge_mode}"
+
+    def merge_features_mv(self, q, merge_net, master_id):
+        """
+            q: [B, nsample, N, 256]
+            q_merged: [B, nsample, 256]
+        """
+        master_is_zero = torch.sum(master_id)
+        assert master_is_zero == 0, "only support master_id is 0"
+        cam_num = q.shape[2]
+
+        q1 = q[:, :, 0, :]
+        q = merge_net[0](q)
+        master_features = q[:, :, 0, :]  # [B, nsample, 128]
+        other_features = q[:, :, 1:, :]  # [B, nsample, 7, 128]
+        q = torch.matmul(other_features, master_features.unsqueeze(-1))  # [B, nsample, 7, 1]
+        q = torch.matmul(other_features.transpose(2, 3), q).squeeze(-1)
+        q_merged = merge_net[1](q) / cam_num  # [B, nsample, 256]
+        q_merged = q1 + q_merged
+        return q_merged
+
+    def generate_query(self, reference_embed, reference_points, reference_mv_feat):
+        query_embeds = self.query_embedding(torch.cat([
+            reference_embed,
+            reference_points,
+            reference_mv_feat,
+        ], dim=-1))  # (B, 21, pt_feat_dim)
+        return query_embeds
+
+    def _debug_viz(self, debug_metas, src_points_sub, idx=0):
+        # Visualize the first view
+        img_single = debug_metas["img"][idx]
+        image = img_single.detach().cpu().unsqueeze(0)
+        image = bchw_2_bhwc(denormalize(image, [0.5, 0.5, 0.5], [1, 1, 1], inplace=False))
+        image = image.mul_(255.0).view(1, 256, 256, 3).squeeze(0).numpy().astype(np.uint8)  # (B, H, W, 3)
+        vis_points = src_points_sub[idx]
+        viz_3d(image, vis_points)
+
+    def forward(self, batch, inputs, **kwargs):
+        results = dict()
+        x = inputs['mlvl_feat']  # mlvl_feat := (BN, 128, 32, 32) / prev (B, N, 128, 32, 32)
+        BT, N = x.shape[0], x.shape[1]
+
+        anchor_joints = inputs['ref_joints']
+        ambig_joints = inputs['ambig_ref_joints'].detach()
+        anchor_center = anchor_joints[:, self.transformer_center_idx:self.transformer_center_idx + 1]
+
+        # * To center
+        pt_xyz = ambig_joints
+        reference_points = anchor_joints
+
+        ref_pt_3d_in_cam = pt_xyz.unsqueeze(1).repeat(1, N, 1, 1)
+        ref_query_3d_in_cam = reference_points.unsqueeze(1).repeat(1, N, 1, 1)
+
+        inp_img_w, inp_img_h = inputs["inp_img_shape"]  # (256, 256)
+        inp_res = torch.Tensor([inp_img_w, inp_img_h]).to(x.device).float()
+        inputs["inp_res"] = inp_res
+        masks = x.new_zeros((BT, N, inp_img_h, inp_img_w))
+        x = self.input_proj(x.flatten(0, 1))  # (BTN, 128, 32, 32)
+
+        x = x.view(BT, N, *x.shape[-3:])  # (BT, N, 256, H, W)
+        feat_dim = x.size(2)
+        assert feat_dim == self.pt_feat_dim, "self.pt_feat_dim should be equal to feat_dim"
+
+        masks = F.interpolate(masks, size=x.shape[-2:]).to(torch.bool)
+
+        coords_embed, _, _, _ = self.position_embeding(inputs, masks)
+
+        sin_embed = self.positional_encoding(masks)
+        sin_embed = self.adapt_pos3d(sin_embed.flatten(0, 1)).view(x.size())  # (B, N, 256, H, W)
+
+        posi_embed = sin_embed + coords_embed
+        x = x + posi_embed
+
+        # =========================================================================
+        # 1. 获取原图相机视角的 2D 投影点 (尚未进行图像增强/翻转)
+        # =========================================================================
+        ref_pt_3d = batch_cam_extr_transf(torch.linalg.inv(inputs["cam_extr"]), ref_pt_3d_in_cam)
+        ref_pt_2d = batch_cam_intr_projection(inputs["cam_intr"], ref_pt_3d)  # (BT, N, nsample, 2)
+        ref_pt_2d_flat = ref_pt_2d.flatten(0, 1)  # (BTN, nsample, 2)
+
+        ref_query_3d = batch_cam_extr_transf(torch.linalg.inv(inputs["cam_extr"]), ref_query_3d_in_cam)
+        ref_query_2d = batch_cam_intr_projection(inputs["cam_intr"], ref_query_3d)  # (BT, N, num_query, 2)
+        ref_query_2d_flat = ref_query_2d.flatten(0, 1)  # (BTN, num_query, 2)
+
+        # =========================================================================
+        # 2. [新增] 施加正向仿射变换：映射至特征图的 Crop/Flip 坐标系中
+        # =========================================================================
+        affine = batch['affine'].reshape(BT * N, -1, 3)[:, :2, :]  # 取 2x3 (BTN, 2, 3)
+
+        # 组装为齐次坐标进行矩阵乘法 P_aug = affine_2x3 @ [P_orig, 1]^T
+        ref_pt_2d_homo = torch.cat([ref_pt_2d_flat, torch.ones_like(ref_pt_2d_flat[..., :1])], dim=-1)
+        ref_pt_2d_aug = torch.bmm(ref_pt_2d_homo, affine.transpose(1, 2))  # (BTN, nsample, 2)
+
+        ref_query_2d_homo = torch.cat([ref_query_2d_flat, torch.ones_like(ref_query_2d_flat[..., :1])], dim=-1)
+        ref_query_2d_aug = torch.bmm(ref_query_2d_homo, affine.transpose(1, 2))  # (BTN, num_query, 2)
+
+        # 归一化到 [-1, 1] 以供 grid_sample 采样
+        ref_pt_2d_grid = (ref_pt_2d_aug.unsqueeze(-2) / inp_res) * 2.0 - 1.0  # (BTN, nsample, 1, 2)
+        ref_query_2d_grid = (ref_query_2d_aug.unsqueeze(-2) / inp_res) * 2.0 - 1.0  # (BTN, num_query, 1, 2)
+
+        # =========================================================================
+        # 用校正后的 UV 坐标对特征图进行采样
+        # =========================================================================
+        pt_sampled_feats = F.grid_sample(x.flatten(0, 1), ref_pt_2d_grid, align_corners=False).squeeze(-1).reshape(BT,
+                                                                                                                   N,
+                                                                                                                   feat_dim,
+                                                                                                                   self.nsample).permute(
+            0, 3, 1, 2)
+        pt_smapled_emb = F.grid_sample(posi_embed.flatten(0, 1), ref_pt_2d_grid, align_corners=False).squeeze(
+            -1).reshape(BT, N, feat_dim, self.nsample).permute(0, 3, 1, 2)
+        pt_merged_feats = self.merge_features_mv(pt_sampled_feats, self.merge_net_feature,
+                                                 torch.cat(batch['master_id'], dim=0))
+
+        query_sampled_feats = F.grid_sample(x.flatten(0, 1), ref_query_2d_grid, align_corners=False).squeeze(
+            -1).reshape(BT, N, feat_dim, self.num_query).permute(0, 3, 1, 2)
+        query_sampled_emb = F.grid_sample(posi_embed.flatten(0, 1), ref_query_2d_grid, align_corners=False).squeeze(
+            -1).reshape(BT, N, feat_dim, self.num_query).permute(0, 3, 1, 2)
+        query_merged_feats = self.merge_features_mv(query_sampled_feats, self.merge_net_query_feature,
+                                                    torch.cat(batch['master_id'], dim=0))
+
+        pt_smapled_emb = torch.sum(pt_smapled_emb, dim=-2)  # [BT, nsample, 256]
+        query_sampled_emb = torch.sum(query_sampled_emb, dim=-2)  # [BT, nquery, 256]
+
+        # =========================================================================
+        # 3. 3D 坐标系根节点归一化
+        # =========================================================================
+        pt_xyz = (pt_xyz - anchor_center) / self.radius
+        reference_points = (reference_points - anchor_center) / self.radius
+
+        # =========================================================================
+        # 4. [新增] 3D 坐标空间对齐：如果原图是左手，需镜像X轴映射为“右手”
+        # =========================================================================
+        is_left = batch.get('is_left', None)
+        if is_left is not None:
+            is_left_BT = is_left.view(BT, N, -1)[:, 0].flatten().bool()
+            pt_xyz[is_left_BT, :, 0] = -pt_xyz[is_left_BT, :, 0]
+            reference_points[is_left_BT, :, 0] = -reference_points[is_left_BT, :, 0]
+
+        # Now the transformer can be trained in batches.
+        interm_ref_joints_list, mano_joints, mano_verts, pred_mano_params = self.transformer(
+            pt_xyz=pt_xyz,  # [BT, 420, 3]
+            pt_feats=pt_merged_feats,  # [BT, 420, 256]
+            pt_embed=pt_smapled_emb,
+            query_feat=query_merged_feats,  # [BT, 21, 256]
+            query_xyz=reference_points,  # [BT, 21, 3]
+            query_emb=query_sampled_emb,
+        )
+
+        all_joints_preds = torch.nan_to_num(interm_ref_joints_list)
+        pred_joints = torch.nan_to_num(mano_joints)
+        pred_verts = torch.nan_to_num(mano_verts)
+
+        # =========================================================================
+        # 5. [新增] Transformer 吐出的是统一“右手”空间结果，如果有左手则要弹回左手空间
+        # =========================================================================
+        if is_left is not None:
+            # all_joints_preds: (NUM_BLOCKS, BT, J, 3)
+            all_joints_preds[:, is_left_BT, :, 0] = -all_joints_preds[:, is_left_BT, :, 0]
+            pred_joints[is_left_BT, :, 0] = -pred_joints[is_left_BT, :, 0]
+            pred_verts[is_left_BT, :, 0] = -pred_verts[is_left_BT, :, 0]
+
+        master_joints_preds = pred_joints
+        master_verts_preds = pred_verts
+
+        # Only the last layer returns the unscaled result, so previous layers still need to be scaled back
+        all_joints_preds = all_joints_preds * self.radius + anchor_center.unsqueeze(0)
+        # We won't make the scale for the last layer as it returns the result from mano layer
+        master_joints_preds = master_joints_preds * self.radius + anchor_center
+        master_verts_preds = master_verts_preds * self.radius + anchor_center
+
+        if pred_mano_params is not None:
+            bbox_3d_size = 0.4
+            if hasattr(self.transformer, 'decoder') and hasattr(self.transformer.decoder, 'bbox_3d_size'):
+                bbox_3d_size = self.transformer.decoder.bbox_3d_size
+
+            global_scale = (2.0 * self.radius) / bbox_3d_size
+            global_trans = anchor_center.squeeze(1)
+
+            pred_mano_params['global_scale'] = global_scale
+            pred_mano_params['global_trans'] = global_trans
+
+        results['joints_preds_list'] = all_joints_preds[:-1, :, :, :]
+        results['master_mano_keypoints_mv'] = master_joints_preds  # (B, 21, 3)
+        results["master_mano_verts_mv"] = master_verts_preds
+        results["pred_mano_params_mv"] = pred_mano_params
+
+        return results

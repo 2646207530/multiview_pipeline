@@ -878,6 +878,220 @@ class InferenceTransform3DMultiView(InferenceTransformUVD):
         return results
 
 
+@TRANSFORM.register_module()
+class FlipTransform:
+
+    def __init__(self, cfg: CN) -> None:
+        super().__init__()
+        self._output_size = cfg.DATA_PRESET.IMAGE_SIZE
+        self._train = cfg.IS_TRAIN
+        self._aug = cfg.AUG
+
+        self._center_jit_factor = cfg.get("CENTER_JIT", 0 if self._aug else 0)
+        self._scale_jit_factor = cfg.get("SCALE_JIT", 0.04 if self._aug else 0)
+        self._color_jit_factor = cfg.get("COLOR_JIT", 0.3 if self._aug else 0)
+        self._rot_jit_factor = cfg.get("ROT_JIT", 10 if self._aug else 0)
+        self._rot_prob = cfg.get("ROT_PROB", 1.0 if self._aug else 0)
+        self._occlusion = cfg.get("OCCLUSION", True if self._aug else False)
+        self._occlusion_prob = cfg.get("OCCLUSION_PROB", 0.1 if self._aug else 0)
+
+        self._with_heatmap = cfg.DATA_PRESET.get("WITH_HEATMAP", False)
+        self._with_mask = cfg.DATA_PRESET.get("WITH_MASK", False)
+        self._heatmap_size = cfg.DATA_PRESET.get("HEATMAP_SIZE", (64, 64))
+        self._heatmap_sigma = cfg.DATA_PRESET.get("HEATMAP_SIGMA", 2.0)
+        self._mask_scale_to_heatmap = cfg.DATA_PRESET.get("MASK_SCALE_TO_HEATMAP", False)
+
+        if self._occlusion:
+            self.occlusion_op = RandomOcclusion(self._occlusion_prob)
+
+    def __call__(self, image, label):
+        img_h, img_w = image.shape[:2]
+
+        # 1. 获取左右手标签
+        is_left = label.get("is_left", False)
+
+        orig_center = label["bbox_center"].copy()
+        orig_scale = label["bbox_scale"]
+
+        if is_left:
+            center_work = np.array([img_w - orig_center[0], orig_center[1]], dtype=np.float32)
+        else:
+            center_work = orig_center.copy()
+
+        if self._aug:
+            cf = self._center_jit_factor
+            sf = self._scale_jit_factor
+            rf = self._rot_jit_factor
+
+            c_factor = np.clip(np.random.normal(loc=0, scale=cf, size=2), -3 * cf, 3 * cf)
+            bbox_center = center_work + c_factor * orig_scale
+            s_factor = np.clip(np.random.normal(loc=1, scale=sf), 1 - 3 * sf, 1 + 3 * sf)
+            bbox_scale = orig_scale * s_factor
+
+            r_factor = np.clip(np.random.normal(loc=0, scale=rf), -3 * rf, 3 * rf)
+            rot = np.deg2rad(r_factor) if np.random.rand() <= self._rot_prob else 0.0
+
+            if self._occlusion:
+                occlu_inp = {}
+                if is_left:
+                    bbox_center_orig = np.array([img_w - bbox_center[0], bbox_center[1]], dtype=np.float32)
+                else:
+                    bbox_center_orig = bbox_center
+
+                occlu_inp["bbox"] = center_scale_to_box(bbox_center_orig, bbox_scale)
+                occlu_inp["width"], occlu_inp["height"] = img_w, img_h
+                occlu_inp["image"] = image
+                image = self.occlusion_op(occlu_inp)["image"]
+        else:
+            bbox_scale = orig_scale
+            bbox_center = center_work
+            rot = 0.0
+
+        rot_mat3d = _construct_rotation_matrix(rot)
+
+        # 得到正常裁剪+增强的 3x3 仿射矩阵（底层函数本身就是返回3x3）
+        affine_work = _affine_transform(center=bbox_center, scale=bbox_scale, out_res=self._output_size, rot=rot)
+
+        # 核心：计算总变换矩阵与逆矩阵（3x3）
+        if is_left:
+            M_flip = np.array([
+                [-1.0, 0.0, img_w],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0]
+            ], dtype=np.float32)
+            # 直接相乘，无需 vstack
+            affine_total = affine_work @ M_flip
+        else:
+            affine_total = affine_work
+
+        # 在这里统一计算出逆矩阵
+        affine_inv = np.linalg.inv(affine_total).astype(np.float32)
+
+        bbox = np.array(center_scale_to_box(bbox_center, bbox_scale))
+
+        # 只取前两行用于 OpenCV 的 warpAffine 和坐标点变换
+        affine_2x3 = affine_total[:2, :]
+        pse_joints_2d = _transform_coords(label["pseudo_2d"], affine_2x3).astype(np.float32)
+
+        pv = label["pseudo_vis"]
+        if not self._train:
+            pse_joints_vis = np.full(CONST.NUM_JOINTS, 1.0, dtype=np.float32)
+        elif pv.sum() < CONST.NUM_JOINTS * 0.3:
+            pse_joints_vis = np.full(CONST.NUM_JOINTS, 0.0, dtype=np.float32)
+        else:
+            pj2d = pse_joints_2d
+            pse_joints_vis = (((pj2d[:, 0] >= 0) & (pj2d[:, 0] < self._output_size[0])) &
+                              ((pj2d[:, 1] >= 0) & (pj2d[:, 1] < self._output_size[1]))).astype(np.float32)
+            if pse_joints_vis.sum() < CONST.NUM_JOINTS * 0.3:
+                pse_joints_vis = np.full(CONST.NUM_JOINTS, 0.0, dtype=np.float32)
+
+        image = cv2.warpAffine(image,
+                               affine_2x3, (int(self._output_size[0]), int(self._output_size[1])),
+                               flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT)
+
+        if self._aug:
+            c_high = 1 + self._color_jit_factor
+            c_low = 1 - self._color_jit_factor
+            image[:, :, 0] = np.clip(image[:, :, 0] * random.uniform(c_low, c_high), 0, 255)
+            image[:, :, 1] = np.clip(image[:, :, 1] * random.uniform(c_low, c_high), 0, 255)
+            image[:, :, 2] = np.clip(image[:, :, 2] * random.uniform(c_low, c_high), 0, 255)
+
+        image_np = image
+        image = tvF.to_tensor(image)
+        assert image.shape[0] == 3
+        image = tvF.normalize(image, [0.5, 0.5, 0.5], [1, 1, 1])
+
+        results = {
+            "rot_rad": rot,
+            "rot_mat3d": rot_mat3d,
+            "affine": affine_total,  # 统一抛出 3x3 总变换矩阵
+            "affine_inv": affine_inv,  # 统一抛出 3x3 逆矩阵
+            "image": image,
+            'image_np': image_np,
+            'target_bbox': bbox,
+            "target_bbox_center": bbox_center,
+            "target_bbox_scale": bbox_scale,
+            "pse_joints_2d": pse_joints_2d,
+            "pse_joints_vis": pse_joints_vis,
+            "cfd": pse_joints_vis,
+            "image_path": label["image_path"]
+        }
+
+        if self._with_mask:
+            mask = cv2.warpAffine(label["image_mask"],
+                                  affine_2x3, (int(self._output_size[0]), int(self._output_size[1])),
+                                  flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT)
+            mask = mask.astype(np.float32) / 255.0
+            results["mask"] = mask
+
+        if self._with_heatmap:
+            p2d = pse_joints_2d
+            npJ = p2d.shape[0]
+            target_pj_heatmap = np.zeros((npJ, self._heatmap_size[1], self._heatmap_size[0]), dtype="float32")
+
+            imsize = np.array(self._output_size)
+            hmsize = np.array(self._heatmap_size)
+            for i in range(npJ):
+                p2d_i = ((p2d[i] / imsize) * hmsize).astype(np.int32)
+                target_pj_heatmap[i], _ = generate_heatmap(target_pj_heatmap[i], p2d_i, self._heatmap_sigma)
+
+            results["pse_joints_heatmap"] = target_pj_heatmap
+            if self._mask_scale_to_heatmap:
+                mask = cv2.resize(results["mask"], self._heatmap_size, interpolation=cv2.INTER_LINEAR)
+                results["mask"] = mask
+
+        return results
+
+
+
+@TRANSFORM.register_module()
+class FlipTransformUVD(FlipTransform):
+
+    def __init__(self, cfg: CN) -> None:
+        super().__init__(cfg)
+        self._center_idx = cfg.DATA_PRESET.CENTER_IDX
+
+    def __call__(self, image, label):
+        results = super().__call__(image, label)
+        affine = results["affine"]
+
+        if 'pseudo_2d' in label:
+            pseudo_uv = label['pseudo_2d']
+            pseudo_uv = _transform_coords(pseudo_uv, affine).astype(np.float32)
+            pj_uv = pseudo_uv / np.array([self._output_size[0] / 2, self._output_size[1] / 2]) - 1  # (21, 2)
+            results['target_pseudo_uv'] = pj_uv.astype(np.float32)
+        return results
+
+
+@TRANSFORM.register_module()
+class FlipTransform3DMultiView(FlipTransformUVD):
+
+    def __init__(self, cfg: CN) -> None:
+        super().__init__(cfg)
+
+    def __call__(self, image, label):
+        results = super().__call__(image, label)
+        rot = results["rot_rad"]
+        rot_mat = results["rot_mat3d"]
+        center = results["target_bbox_center"]
+        scale = results["target_bbox_scale"]
+        cc = label["cam_center"]
+
+        '''affine_postrot = _affine_transform_post_rot(center=center,
+                                                    scale=scale,
+                                                    optical_center=cc,
+                                                    out_res=self._output_size,
+                                                    rot=rot)
+        '''
+        target_cam_intr = label["cam_intr"]#affine_postrot.dot(label["cam_intr"])
+        results["target_cam_intr"] = target_cam_intr
+        #results["extr_prerot"] = rot_mat
+
+        return results
+
+
 # @TRANSFORM.register_module()
 # class SimpleTransform2D:
 

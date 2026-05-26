@@ -60,6 +60,29 @@ def skip(ws: Workspace) -> Dict[str, Any]:
     return {"skipped": True}
 
 
+def _release_gpu_memory_before_subprocess():
+    """子进程跟 app.py 共享物理 GPU; 先把 app.py 这边缓存的 SAM2 模型 + torch
+    CUDA cache 清掉, 否则子进程 init NCCL/barrier 就 OOM."""
+    import gc
+    try:
+        from .sam2_interactive import release_all as _release_sam2
+        _release_sam2()
+    except Exception as e:
+        print(f"[step4] release_sam2 failed (ignored): {e}")
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # 如果你装了 PyTorch >= 2.0, 也调一下 IPC collect
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[step4] empty_cache failed (ignored): {e}")
+
+
 def run(ws: Workspace, epochs: int = 5, lr: float = 1e-5, batch_size: int = 1,
         gpu_id: str = "0") -> Dict[str, Any]:
     """跑 finetune 子进程. epochs=0 等同于 skip."""
@@ -73,6 +96,9 @@ def run(ws: Workspace, epochs: int = 5, lr: float = 1e-5, batch_size: int = 1,
     undist = state.steps["undistort"].outputs
     undist_root = Path(undist["undist_root"])
     capture_id = undist["capture_id"]
+
+    # 子进程要跟 app.py 抢同一张物理 GPU, 先把 app.py 这边的 SAM2 + cache 退掉
+    _release_gpu_memory_before_subprocess()
 
     ft_ckpt = run_hand_estimation_finetune_subprocess(
         project_root=_PROJECT,

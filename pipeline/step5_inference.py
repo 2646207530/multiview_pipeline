@@ -66,6 +66,11 @@ def run(ws: Workspace, gpu_id: str = "0",
         else:
             print(f"[step5] 默认: exp/new/checkpoints/checkpoint_30")
 
+    # 释放 app.py 进程里可能还挂着的模型 (SAM2 / 任何残留) +
+    # 清 CUDA cache, 把整张物理 GPU 让给 inference 子进程.
+    from .step4_finetune import _release_gpu_memory_before_subprocess
+    _release_gpu_memory_before_subprocess()
+
     # ── 1) 跑 HE 子进程, 出 mano.json + hand0/hand1.mp4 ────────────────
     he_output = ws.he_output_dir
     he_output.mkdir(parents=True, exist_ok=True)

@@ -42,8 +42,8 @@ from tqdm import tqdm
 
 _PROJECT = Path(__file__).resolve().parent
 _HE_REL = Path("model") / "Hand_Estimation"
-_HE_CFG_REL = "config/release/GOLF_Inference.yaml"
-_HE_FT_TEMPLATE_REL = "config/release/WORK_GOLF_DINO.yaml"   # 用作 self-supervised FT 的模板
+_HE_CFG_REL = "config/release/FLIP_GOLF_Inference.yaml"  # FlipModel 推理 cfg
+_HE_FT_TEMPLATE_REL = "config/release/FLIP_GOLF_DINO.yaml"   # 用作 self-supervised FT 的模板 (FlipModel 版本)
 _HE_CKPT_REL = "exp/new/checkpoints/checkpoint_30"
 
 
@@ -268,7 +268,7 @@ def write_pseudo_labels_from_hamer(undist_root: Path, capture_id: str,
 def make_pseudo_video(undist_root: Path, capture_id: str,
                       cam_names: Sequence[str], cam_idx_of: Dict[str, int],
                       total_frames: int, frame_dirs_undist: Dict[str, Path],
-                      fps: int = 10, downscale: int = 2,
+                      fps: int = 60, downscale: int = 2,
                       out_filename: Optional[str] = None,
                       save_per_frame_jpg: bool = True) -> Optional[Path]:
     """把所有相机所有帧的伪标 overlay 拼成一个左右拼接的 mp4, 与 Hand_Estimation
@@ -388,7 +388,7 @@ def make_mv_mano_video(undist_root: Path, capture_id: str,
                       l_rot_arr: np.ndarray, l_pose_arr: np.ndarray,
                       l_shape_arr: np.ndarray, l_trans_arr: np.ndarray,
                       mano_root: str,
-                      fps: int = 10, downscale: int = 2,
+                      fps: int = 60, downscale: int = 2,
                       out_filename: Optional[str] = None) -> Optional[Path]:
     """把 Hand_Estimation 多视角 MANO 输出投影到每个相机并画 21-关节骨架, 与
     ``make_pseudo_video`` 同样的样式 (绿色右手 / 蓝色左手 / 红色关节点) 输出
@@ -574,7 +574,11 @@ def run_hand_estimation_subprocess(project_root: Path, undist_root: Path,
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    # 物理 GPU 选择走 CUDA_VISIBLE_DEVICES; 父进程已设过就尊重
+    # (`CUDA_VISIBLE_DEVICES=2 python app.py` 这种用法).
     env.setdefault("CUDA_VISIBLE_DEVICES", gpu_id)
+    # subprocess 内部用相对索引 0 (CUDA_VISIBLE_DEVICES 限定后只剩一张).
+    cli_gpu_id = "0"
     _prepend_conda_lib_to_ld_path(env)
 
     # ckpt_override 路径要用绝对路径做软链, 避免 cwd 变化
@@ -605,10 +609,11 @@ def run_hand_estimation_subprocess(project_root: Path, undist_root: Path,
         "--cfg", str(cfg_path),
         "--input_dir", str(undist_root),
         "--output_dir", str(output_dir),
-        "--gpu_id", gpu_id,
+        "--gpu_id", cli_gpu_id,
         "--workers", "0",
     ]
-    print(f"[mvinit] 调 Hand_Estimation: cd {he_dir} && {' '.join(cmd)}")
+    print(f"[mvinit] 调 Hand_Estimation (CUDA_VISIBLE_DEVICES="
+          f"{env.get('CUDA_VISIBLE_DEVICES', '<unset>')}): cd {he_dir} && {' '.join(cmd)}")
     try:
         subprocess.run(cmd, cwd=str(he_dir), check=True, env=env)
     finally:
@@ -679,6 +684,26 @@ def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Pat
             tf["OCCLUSION"] = False
             tf["OCCLUSION_PROB"] = 0.0
 
+    # ── FLIP_GOLF_DINO.yaml 里 MANO.MODEL_PATH / MEAN_PARAMS / DATA_DIR
+    # 是师兄机器上的硬编码 (/home/cyc/UST-Hand/mano_data 之类).
+    # 这里递归把所有 MANO 子节点的路径换成相对路径 'mano_data',
+    # 子进程会以 cwd=he_dir (Hand_Estimation/) 启动, 相对路径会落到
+    # he_dir/mano_data/, 正好就是 pipeline 自己的 MANO 目录.
+    def _patch_mano_paths(node):
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            if k == "MANO" and isinstance(v, dict):
+                if "MODEL_PATH" in v:
+                    v["MODEL_PATH"] = "mano_data"
+                if "DATA_DIR" in v:
+                    v["DATA_DIR"] = "mano_data"
+                if "MEAN_PARAMS" in v:
+                    v["MEAN_PARAMS"] = "mano_data/" + os.path.basename(v["MEAN_PARAMS"])
+            elif isinstance(v, dict):
+                _patch_mano_paths(v)
+    _patch_mano_paths(ft_cfg)
+
     ft_yaml_path = Path(undist_root) / "_ft_cfg.yaml"
     with open(ft_yaml_path, "w") as f:
         yaml.safe_dump(ft_cfg, f, sort_keys=False)
@@ -689,7 +714,10 @@ def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Pat
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    # 物理 GPU 选择走 CUDA_VISIBLE_DEVICES; 父进程已设过就尊重.
     env.setdefault("CUDA_VISIBLE_DEVICES", gpu_id)
+    # subprocess 内部用相对索引 0 (CUDA_VISIBLE_DEVICES 限定后只剩一张).
+    cli_gpu_id = "0"
     _prepend_conda_lib_to_ld_path(env)
     cmd = [
         sys.executable, "train_ddp_sf.py",
@@ -697,11 +725,12 @@ def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Pat
         "--ft",                             # 启用 ft 分支
         "--reload", str(pretrained_path),   # 经过我们 patch, 指向预训练 ckpt 目录
         "--exp_id", exp_id,
-        "--gpu_id", gpu_id,
+        "--gpu_id", cli_gpu_id,
         "-b", str(batch_size),
         "-w", "0",
     ]
-    print(f"[mvinit] 调 Hand_Estimation 自监督 FT: cd {he_dir} && {' '.join(cmd)}")
+    print(f"[mvinit] 调 Hand_Estimation 自监督 FT (CUDA_VISIBLE_DEVICES="
+          f"{env.get('CUDA_VISIBLE_DEVICES', '<unset>')}): cd {he_dir} && {' '.join(cmd)}")
     subprocess.run(cmd, cwd=str(he_dir), check=True, env=env)
 
     # ── 3) 定位最新的 checkpoint 目录 ────────────────────────────────
@@ -731,15 +760,18 @@ def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Pat
         raise RuntimeError(f"{ckpts_root} 下无检查点子目录, FT 失败?")
     cand_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     new_ckpt = cand_dirs[0].resolve()
-    # 校验里面有 TestMultiviewStereo.pth.tar
-    if not (new_ckpt / "TestMultiviewStereo.pth.tar").is_file():
-        # 找下一个候选
+    # 校验里面至少有一个 *.pth.tar (跟 MODEL.TYPE 同名, 比如
+    # TestMultiviewStereo.pth.tar / TestFlipMultiviewStereo.pth.tar).
+    # 不写死类名, 适配后续切换不同 model 的情况.
+    def _has_pthtar(d: Path) -> bool:
+        return any(d.glob("*.pth.tar"))
+    if not _has_pthtar(new_ckpt):
         for cd in cand_dirs[1:]:
-            if (cd / "TestMultiviewStereo.pth.tar").is_file():
+            if _has_pthtar(cd):
                 new_ckpt = cd.resolve()
                 break
         else:
-            raise RuntimeError(f"FT 输出目录里没有 TestMultiviewStereo.pth.tar: "
+            raise RuntimeError(f"FT 输出目录里没有 *.pth.tar: "
                                f"{[str(p) for p in cand_dirs]}")
     print(f"[mvinit] FT 完成, 新 checkpoint: {new_ckpt}")
     return new_ckpt
@@ -849,27 +881,26 @@ def parse_mano_json_to_arrays(json_path: Path, total_frames: int,
     #   output_joint[i] = (J_canonical[i] - J_canonical[9]) + mano_trans
     # 所以 mano_trans = "joint 9 (OpenPose Middle MCP) 在世界系下应当的位置".
     #
-    # 左手专用:
-    #   HE dataset (lib/datasets/golf.py:262-280, getitem_test) 对 hand_id==1 (左手)
-    #   把整张图 X-flip 后再喂模型, 但相机外参/内参没有同步翻转. 模型在镜像图像上
-    #   输出 right-format pose + trans, 这个 trans 处于 "X-flip 后的世界系" 里, 不
-    #   是真实世界. HE 自己的可视化 (visualize_mano.py:123) 用 2D X-flip 把它打回正
-    #   像; way_vis 走的是真 3D 渲染, 所以必须先把 trans_l 的 X 分量取反, 才能落到
-    #   真实世界. (HaMER 的 infer.py:411 显式做了 pred_cam[:,1] *= flip_correction
-    #   这步 X-flip, 所以 HaMER 写出的 npy 不需要这步.)
+    # FlipModel (师兄新版) 左右手统一约定:
+    #   * Dataset/Transform 把左手图水平 X-flip 后再喂网络, target_cam_intr / extr
+    #     保持原始 (未翻).
+    #   * flip_head 内部 (MVptEmb_head_MVT.py:1185-1189) 对 is_left 样本的 pred_joints/
+    #     pred_verts 做 x = -x 反翻, 再加 anchor_center → 输出 master_joints_mvf
+    #     **已经落在真实世界 master cam 系 (cam0)**, 左右手同一坐标系.
+    #     (这也是为啥 visualize_mano.py 现在的 2D 投影不再需要手动 width-x 镜像.)
+    #   * pose / shape 没被翻, 仍是 "right hand 内部格式". way_vis 通过
+    #     right_to_left_mano_params (1,-1,-1) 镜像 rot/pose 再喂左手 MANO layer 来渲染.
+    #
+    # 因此 trans_l 不再需要 X-flip (跟旧 TestModel 不一样, 旧模型 trans_l 在
+    # X-mirror world 里). 左右手都只需:
+    #   transl = HE_trans - J_posed_smplx[Middle_MCP_idx]
+    # 其中 J_posed_smplx 对左手用左手 layer (要先 mirror rot/pose), 对右手用右手 layer.
     #
     # way_vis 用 smplx.MANO 渲染时:
     #   output_joint[i] = J_posed_smplx[i] + transl
-    # 注意 J_posed_smplx[i] 在 transl=0 时不是原点 (zero-pose 下 wrist ≈ (0.10, 0.006, 0.006)).
-    # 要让 output_joint[Middle_MCP] = HE_trans (HE 想要的 Middle MCP 位置):
-    #   transl = HE_trans - J_posed_smplx[Middle_MCP_idx]
-    # 左手再多一步 X-flip:
-    #   transl_l = X_FLIP(HE_trans_l) - J_posed_smplx_left[Middle_MCP_idx]
-    #
+    # zero-pose 下 wrist ≈ (0.10, 0.006, 0.006), 所以 J_posed[Middle_MCP_idx] 非零.
     # smplx LBS 16-joint 排序: 0=wrist, 1-3=index, 4-6=middle, 7-9=pinky,
     # 10-12=ring, 13-15=thumb.
-    # 左手要在镜像后 (左手 layer + (1,-1,-1) 镜像 rot/pose) 上算 J_posed, 因为 way_vis 渲染
-    # 左手就走这条镜像路径.
     try:
         import smplx
         import torch as _torch
@@ -880,7 +911,6 @@ def parse_mano_json_to_arrays(json_path: Path, total_frames: int,
                                     use_pca=False, is_rhand=False,
                                     flat_hand_mean=True)
         _MIRROR = _torch.tensor([1.0, -1.0, -1.0], dtype=_torch.float32)
-        _XFLIP = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
         _MIDDLE_MCP_IDX = 4   # smplx LBS joint idx for Middle_1 (Middle MCP)
 
         def _correct(rot_arr, pose_arr, shape_arr, trans_arr, layer, side):
@@ -892,30 +922,29 @@ def parse_mano_json_to_arrays(json_path: Path, total_frames: int,
                 rot_t = _torch.from_numpy(rot_arr[i].astype(np.float32)).reshape(1, 3)
                 pose_t = _torch.from_numpy(pose_arr[i].astype(np.float32)).reshape(1, 45)
                 shape_t = _torch.from_numpy(shape_arr[i].astype(np.float32)).reshape(1, 10)
+                # 左手: rot/pose 是 "right format", mirror (1,-1,-1) 后喂左手 layer
+                # 算 J_posed[Middle_MCP] (跟 way_vis right_to_left_mano_params 走的链路一致).
                 if side == "left":
                     rot_t = rot_t * _MIRROR
                     pose_t = (pose_t.reshape(-1, 3) * _MIRROR).reshape(1, 45)
                 with _torch.no_grad():
                     out = layer(global_orient=rot_t, hand_pose=pose_t, betas=shape_t)
                 J = out.joints[0]                                  # (≥16, 3)
-                mcp_local = J[_MIDDLE_MCP_IDX].cpu().numpy()       # J_posed[4] in local frame
-                # 左手 trans 的 X-flip (Route B 下理论一致, 必须开):
-                #   dataset 用 Route B (E → M·E·M 共轭) 训练后, 模型 master_joints_mvf
-                #   输出位于 X-mirrored 世界系 (X_model = M·X_real). npy / way_vis 这边
-                #   使用 cam0 真实 K + 真实 world2cam 渲染, 需要把模型输出 unmirror 回
-                #   真实世界: trans_real = M · trans_model = (-x, y, z).
-                #   (rot/pose 由 way_vis 的 right_to_left_mano_params 通过 MIRROR_LEFT_PARAMS
-                #   自动处理, 不在 parse 里翻.)
-                if side == "left":
-                    trans_arr[i] = trans_arr[i] * _XFLIP
-                trans_arr[i] = trans_arr[i] - mcp_local            # X_FLIP(HE_trans) - J_posed[4]
+                mcp_local = J[_MIDDLE_MCP_IDX].cpu().numpy()       # J_posed[4]
+                # FlipModel 左右手 master_joints_mvf 都在真实世界 master cam (cam0) 系,
+                # 不需要老 TestModel 那种 trans_l X-flip. way_vis 渲染时:
+                #   output_joint[i] = J_posed_smplx[i] + transl
+                # 让 output_joint[Middle_MCP] = HE_trans:
+                #   transl = HE_trans - J_posed_smplx[Middle_MCP]
+                trans_arr[i] = trans_arr[i] - mcp_local
                 n_fixed += 1
             return n_fixed
 
         n_r = _correct(r_rot, r_pose, r_shape, r_trans, mano_r_smplx, "right")
         n_l = _correct(l_rot, l_pose, l_shape, l_trans, mano_l_smplx, "left")
         print(f"[mvinit] 已把 trans 修正为 smplx transl 语义 "
-              f"(right: HE_trans - J_posed[4]; left: X_FLIP(HE_trans) - J_posed_l[4])"
+              f"(transl = HE_trans - J_posed[4], 左右手同公式; "
+              f"left 端 J_posed 在 mirror 过的 rot/pose + 左手 layer 上算)"
               f": right {n_r} 帧 / left {n_l} 帧")
     except Exception as e:
         print(f"[mvinit] trans 修正失败 ({e}), 保留原 trans (way_vis 渲染会偏)")
@@ -935,7 +964,7 @@ def init_hands_from_multiview(*, project_root: Path, capture_dir: Path,
                               force_undistort: bool = False,
                               force_pseudo: bool = False,
                               pseudo_video: bool = True,
-                              pseudo_video_fps: int = 10,
+                              pseudo_video_fps: int = 60,
                               pseudo_video_downscale: int = 2,
                               mv_finetune_epochs: int = 0,
                               mv_finetune_lr: float = 1e-5,

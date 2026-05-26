@@ -1,0 +1,192 @@
+# FlipModel 推理用 yaml: visualize_mano.py 加载它来跑训练好的 FlipModel.
+# MODEL 段跟 FLIP_GOLF_DINO.yaml 同步 (TestFlipMultiviewStereo + flip_head 等),
+# DATASET 段用 FlipDataset (带 INCLUDE_RIGHT_HAND=true, 让右手也进 mapping),
+# TRANSFORM 用 FlipTransform3DMultiView 但 AUG=false (推理不要随机增强).
+# MANO 路径用相对的 mano_data (cwd=Hand_Estimation/ 时正确).
+DATASET:
+  TEST:
+    NAME: FlipDataset
+    TYPE: FlipMultiViewTempo
+    DATA_MODE: Test
+    DATA_ROOT: /mnt/data1/cyc/Golf_demo
+    DATA_SPLIT: test
+    SKIP_FRAMES: 0
+    WINDOW_SIZE: 3
+    STEP_SIZE: 3
+    N_VIEWS: 2
+    SETUP: s0
+    USE_LEFT_HAND: true
+    FILTER_INVISIBLE_HAND: true
+    TEST_WITH_MULTIVIEW: true
+    MASTER_SYSTEM: as_constant_camera
+    INCLUDE_RIGHT_HAND: true   # 推理时两只手都要出 bbox/3D
+    TRANSFORM:
+      TYPE: FlipTransform3DMultiView
+      AUG: false
+DATA_PRESET:
+  USE_CACHE: false
+  BBOX_EXPAND_RATIO: 2.0
+  IMAGE_SIZE:
+  - 256
+  - 256
+  FINETUNE: false
+  CENTER_IDX: 9
+  NUM_JOINTS: 21
+  NUM_VERTS: 778
+  WITH_HEATMAP: true
+  HEATMAP_SIZE:
+  - 32
+  - 32
+  HEATMAP_SIGMA: 2.0
+  WITH_MASK: false
+MODEL:
+  TYPE: TestFlipMultiviewStereo
+  PRETRAINED: null
+  INIT_RENDERER: true
+  IMAGE_SIZE: 256
+  IMAGE_MEAN:
+  - 0.485
+  - 0.456
+  - 0.406
+  IMAGE_STD:
+  - 0.229
+  - 0.224
+  - 0.225
+  KP_HEAD:
+    TYPE: KeypointPredictNet
+    BACKBONE:
+      TYPE: ConvNeXt_Small
+      PRETRAINED: true
+    FEAT_DIM: 512
+    NUM_VERTS: 778
+    NUM_JOINTS: 21
+    NUM_VIEW: 5
+    ROOT_IDX: 9
+    IMAGE_SIZE:
+    - 256
+    - 256
+    DST_DIM: 256
+    JAF_DIM: 128
+
+  SV_HEAD:
+    TYPE: SingleViewNet
+    BACKBONE:
+      TYPE: ConvNeXt_Small
+      PRETRAINED: true
+    RANDOM_MASK: true
+    NUM_JOINT: 21
+    ROOT_IDX: 9
+    BBOX_3D_SIZE: 0.4
+    VIEW_NUMS: 2
+    NUM_FMS: 8
+    OUT_DIM: 32
+    FEATURE_SIZE: 64
+    CHANNEL: 768
+    IMAGE_SIZE:
+    - 256
+    - 256
+    MANO:
+      DATA_DIR: mano_data
+      MODEL_PATH: ./mano_data
+      GENDER: neutral
+      NUM_HAND_JOINTS: 15
+      MEAN_PARAMS: ./mano_data/mano_mean_params.npz
+      CREATE_BODY_POSE: false
+    MANO_HEAD:
+      TYPE: transformer_decoder
+      IN_CHANNELS: 2048
+      TRANSFORMER_DECODER:
+        depth: 6
+        heads: 8
+        mlp_dim: 1024
+        dim_head: 64
+        dropout: 0.0
+        emb_dropout: 0.0
+        norm: layer
+        context_dim: 1280
+
+  MV_HEAD:
+    TYPE: UMA_MVptEmb_Head
+    TRANSFORMER:
+      TYPE: PtEmbedTR_Temporal
+      DROPOUT: 0.1
+      POINTS_FEAT_DIM: 256
+      INPUT_FEAT_DIM: 256
+      TRANSFORMER_DIM: 256
+      NUM_ATTENTION_HEADS: 4
+      NUM_HIDDEN_LAYERS: 4
+      WINDOW_SIZE: 3
+      VIEW_NUMS: 2
+      N_BLOCKS: 4
+      N_NEIGHBOR: 32
+      N_NEIGHBOR_QUERY: 21
+      WITH_POSI_EMBED: true
+      PARAMETRIC_OUTPUT: true
+      PREDICT_INV_SIGMOID: true
+      TRANSFORMER_CENTER_IDX: 9
+      MANO:
+        DATA_DIR: mano_data
+        MODEL_PATH: ./mano_data
+        GENDER: neutral
+        NUM_HAND_JOINTS: 15
+        MEAN_PARAMS: ./mano_data/mano_mean_params.npz
+        CREATE_BODY_POSE: false
+    POSITIONAL_ENCODING:
+      TYPE: SinePositionalEncoding3D
+      NUM_FEATS: 128
+      NORMALIZE: true
+    WITH_POSITION: true
+    WITH_MULTIVIEW: true
+    NUM_QUERY: 21
+    NUM_PREDS: 3
+    NUM_REG_FCS: 2
+    DEPTH_NUM: 32
+    POSITION_RANGE:
+    - -0.6
+    - -0.6
+    - 0.0
+    - 0.6
+    - 0.6
+    - 1.2
+    LID: false
+    DEPTH_START: 0.0
+    DEPTH_END: 1.2
+    POINTS_FEAT_DIM: 256
+    EMBED_DIMS: 256
+    IN_CHANNELS: 192
+    CENTER_SHIFT: true
+    N_SAMPLE: 420
+    RADIUS_SAMPLE: 0.2
+    CAM_FEAT_MERGE: attn
+    QUERY_TYPE: UAM
+
+  LOSS:
+    USE_2D_GT: false
+    USE_GTR: true
+    NUM_VIEW: 2
+    ROOT_IDX: 9
+    BBOX_3D_SIZE: 0.4
+    IMAGE_SIZE:
+    - 256
+    - 256
+    JOINTS_LOSS_TYPE: l1
+    MESHES_LOSS_TYPE: l1
+    HEATMAP: 0.001
+    HEATMAP_JOINTS_WEIGHT: 10.0
+    RLE: 0.1
+    NLL: 0.1
+    ENTRO: 0.1
+    NF: 0.01
+    MESH_3D: 1
+    KEYPOINTS_3D: 1
+    KEYPOINTS_2D: 1
+    PROJ_2D: 10
+    POSE_LOSS_WEIGHT: 1.0
+    POSE_UNCERT_WEIGHT: 0.01
+    BETA_LOSS_WEIGHT: 0.001
+    BETA_UNCERT_WEIGHT: 1.0
+    GLOBAL_ORIENT: 0.0001
+    HAND_POSE: 0.0001
+    BETAS: 0.0005
+    POSE_N: 0.01
+    SHAPE_N: 1
