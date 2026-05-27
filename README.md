@@ -1,20 +1,39 @@
 # Golf Multi-View Pipeline (web wizard)
 
-Gradio web 界面包装的多视角高尔夫手部估计 pipeline: 用户选完 capture 文件夹之后**一步一步点按钮跑** (raw 抽帧 → 去畸变 → 手部检测 → HaMER 伪标 → (可选) 自监督 finetune → 多视角推理 → 3D 可视化), 中间结果可以预览, 状态自动持久化 (`<capture>/.pipeline/state.json`), 关掉浏览器再开能续上.
+Gradio web 界面包装的多视角高尔夫手部估计 pipeline: 用户选完 capture 文件夹之后**一步一步点按钮跑** (raw 抽帧 → 去畸变 → 双手 bbox 检测 → 双手 2D 关节伪标 → (可选) 自监督 finetune → 多视角 3D 推理 → 3D 轨迹可视化), 中间结果可以预览, 状态自动持久化 (`<capture>/.pipeline/state.json`), 关掉浏览器再开能续上.
 
-## 7 个 wizard step
+输出视频统一 **60fps**, 每一步都带**单帧浏览** (slider 拖到任意一帧看 bbox / 21 关节 / 双手 3D 投影).
 
-| # | 名字 | 干什么 | UI 预览 |
-|---|---|---|---|
-| 0 | Setup | 选 `capture_dir` + `seq_name`, 探测相机 (cam0/cam1); 若 capture 下只有 `.raw` 自动解码出 `.tmp_images/<cam>/frame_*.jpg` | 相机 + raw 抽帧 JSON |
-| 1 | Undistort | 算 newK + 写去畸变 jpg + `calib_undistorted` yaml | slider 浏览 cam0 / cam1 任意一帧 |
-| 2 | Detect | YOLO 检测每帧两手 bbox, 存 `detections.json` + 每个相机一个完整 overlay mp4 | cam0 / cam1 bbox overlay mp4 |
-| 3 | Pseudo | 读 step2 的 bbox, 喂 HaMER 拿 21 关节 → `pseudo_label_wilor/*.npz`; 同时生成 `_pseudo_vis/*.mp4` | overlay mp4 |
-| 4 | Finetune (opt) | 自监督 finetune Hand_Estimation 权重, ckpt 直接保存到 `<workspace>/_finetune/<id>/` | log |
-| 5 | Infer | 跑 HE 多视角推理 → `_mano.json`, 组装最终 npy. ckpt 可下拉自选 (默认: finetune 跑过用它, 否则 `exp/new/checkpoints/checkpoint_30`). **没物体轨迹 csv 时只输出手, 跳过 object 字段** | hand0/hand1 mp4 + npy |
-| 6 | Visualize | `way_vis` 渲染 3D 轨迹 mp4. npy 没 object 时自动切 `show=hand` | trajectory_view0 / view1 mp4 |
+## 7 个 wizard step (标准 pipeline)
 
-v1 不含: SAM2 交互式手分割, SportGS 接触优化, 单帧 standard_pose 抽取.
+| # | 名字 | 干什么 | 后端选项 | UI 预览 |
+|---|---|---|---|---|
+| 0 | Setup | 选 `capture_dir` + `seq_name`, 探测相机 (cam0/cam1); 若 capture 下只有 `.raw` 自动解码出 `.tmp_images/<cam>/frame_*.jpg` | — | 相机 + raw 抽帧 JSON |
+| 1 | Undistort | 算 newK + 写去畸变 jpg + `calib_undistorted` yaml (含 K + R/t, 全部基于 cam0 master frame) | — | slider 浏览 cam0 / cam1 任意一帧 |
+| 2 | Detect | 每帧每只手出一个 bbox, 存 `detections.json` + 每个相机一个 60fps overlay mp4. 可选 `bbox patch` 把 bbox 中心不变长宽各 ×k 扩张 | **yolo** (默认逐帧检测) / **sam2** (首帧/多帧手动标点 → 视频分割 propagate, 适合 YOLO 漏检或遮挡场景) | cam0/cam1 mp4 + 单帧 slider |
+| 3 | Pseudo | 读 step2 的 bbox, 喂 2D 估计后端拿 21 关节 → `pseudo_label_wilor/*.npz`; 生成 `_pseudo_vis/*.mp4` + 全帧 jpg | **hamer** / **wilor** (新, 通常更准, npz 格式一致) | cam0\|cam1 拼接 overlay mp4 + 单帧 slider |
+| 4 | Finetune (opt) | 自监督 finetune Hand_Estimation 权重 (FlipModel + `FLIP_GOLF_DINO.yaml`), ckpt 存到 `<workspace>/_finetune/<id>/` | — | log + ckpt 路径 |
+| 5 | Infer | 跑 HE 多视角推理 (FlipModel + `FLIP_GOLF_Inference.yaml`, 左右手都参与) → `_mano.json`, 组装最终 npy. ckpt 下拉自选: finetune 跑过默认用 FT 产物, 否则用 `exp/new/checkpoints/checkpoint_30`. **没物体轨迹 csv 时只输出手, 跳过 object 字段** | — | hand0/hand1 mp4 + 单帧 slider + npy |
+| 6 | Visualize | `way_vis` 渲染 3D 轨迹 mp4. npy 没 object 时自动切 `show=hand` | — | trajectory_view0 / view1 mp4 |
+
+标准跑法: **0 → 1 → 2 → 3 → 4 (可选) → 5 → 6**. 每一步完成后 `state.json` 写一次, 中间结果都能在 UI 单帧浏览, 不满意可以原地改参数勾 `Force` 重跑那一步, **后续步骤无需重跑** (除非那一步的输入也变了).
+
+### 模型组合默认值
+
+| 步骤 | 默认后端 | 备选 |
+|---|---|---|
+| Step 2 (Detect) | YOLO | SAM2 (首帧/多帧标正负点, 自动 propagate, 推荐处理遮挡场景) |
+| Step 3 (Pseudo) | HaMER | WiLoR |
+| Step 4 (FT) | FlipModel (TestFlipMultiviewStereo) | — |
+| Step 5 (Infer) | FlipModel | — |
+
+### 不在标准 pipeline 里的 mega-stage / 外挂
+
+下面这些**不属于** 0~6 的标准链路, 用到时单独触发, 不在 web wizard 主路径里:
+
+- **SportGS 接触优化** — 老 `golf-hand-object` 仓库里的 stage, 在 npy 之外做物体-手接触约束. 当前 pipeline **不包含**, 想用要切到原仓库.
+- **单帧 standard_pose 抽取** — 老 CLI `run_golf_capture_to_npy.py` 的某个旁路功能, **不在 wizard 里**, 直接 CLI 跑.
+- **way_vis 单视角导出 / 自定义 club mesh** — 都还在 Step 6, 但 club mesh 路径写死在 `config/baseball_golf.json`, 想换 mesh 手动改 json.
 
 ---
 
@@ -58,14 +77,23 @@ python app.py [--port 7860] [--host 0.0.0.0]
 
 1. **Setup** tab: 填 `Capture dir` + `Seq name`, 点 `Initialize workspace`.
    - 没解过的 `.raw` 文件会自动转 jpg 到 `<capture>/.tmp_images/`.
-   - 浏览器关了再开, 重新点 Initialize 就能**从已有 state.json 恢复所有 step 的预览**.
+   - 浏览器关了再开, 重新点 Initialize 就能**从已有 state.json 恢复所有 step 的预览** (含每个 step 的视频 + 单帧 slider + ckpt 下拉).
 2. **1. Undistort**: 点 `Run undistort` (秒级). slider 拖动浏览任意一帧的 cam0 / cam1 去畸变结果.
-3. **2. Hand Detection**: 点 `Run hand detection`, 完成后两个相机各出一个完整 overlay mp4.
-4. **3. HaMER Pseudo Label**: 点 `Generate pseudo labels` (慢, 约 0.5–2h depending on 帧数). 看到伪标 overlay mp4.
-5. **4. Self-supervised Finetune**: 默认不勾选, 跳过直接用 `checkpoint_30`. 想 finetune 就勾上 + 调 epochs.
-   - finetune 完产物存在 `<capture>/.pipeline/_finetune/<exp_name>__<inner>/`, **不污染**项目目录.
-6. **5. Multi-view Inference + npy**: 在 Checkpoint 下拉里选权重 (默认就是 finetune 产物 / 否则官方 ckpt), 点 `Run HE inference`. 看到 hand0/hand1 mp4 + 拿到 npy 文件.
-7. **6. 3D Visualization**: 点 `Render way_vis`. 看到 3D 轨迹 mp4 (两个视角各一个).
+3. **2. Hand Detection**: 选检测后端.
+   - **YOLO** (默认): 直接点 `Run hand detection` 逐帧检. 完成出 cam0/cam1 各一个 60fps overlay mp4 + 拖单帧 slider 看任意一帧.
+   - **SAM2** (推荐处理 YOLO 漏检 / 遮挡场景): 点 `Load first frames` 加载 SAM2 (~5-10s) → 拖 `frame slider` 到任意一帧 → 选**当前点类型** (右手正/右手负/左手正/左手负) → 在图上点击加点 (即时看 mask) → 可以换到别的帧继续标 (跨帧 anchor 持久化) → 点 `Run hand detection` → SAM2 从 frame 0 把所有 anchor 当 memory 一口气 propagate 到末尾.
+   - **bbox patch** (可选): 默认 `1.0` (紧 bbox). 想给下游 HaMER/WiLoR/USThand 看到更大的 crop 区域可调到 `1.2~2.0`, 中心不变长宽各乘 k, clip 到原图. 改了要勾 `Force re-run`.
+4. **3. Pseudo Label**: 选 2D 估计后端.
+   - **HaMER** (默认, 稳): rescale=2.5, 慢.
+   - **WiLoR** (通常更准): rescale=2.0, 快一些.
+   - 完成出 `_pseudo_vis/<seq>_pseudo_overlay.mp4` (cam0|cam1 拼接, 60fps) + 单帧 slider. 落地 `pseudo_label_wilor/*.npz` (目录名是历史命名, 实际内容就是你选的 backend 输出).
+5. **4. Self-supervised Finetune** (optional): 默认不勾选, 跳过直接用 `checkpoint_30` 的 FlipModel 权重. 想 finetune 就勾 `Enable` + 调 epochs.
+   - 用 `FLIP_GOLF_DINO.yaml` 模板, 模型类 `TestFlipMultiviewStereo`.
+   - ckpt 存到 `<capture>/.pipeline/_finetune/<exp>__<inner>/`, **不污染**项目目录. step5 的 Checkpoint 下拉自动列出.
+6. **5. Multi-view Inference + npy**: 在 Checkpoint 下拉里选权重 (默认: finetune 跑过用 FT 产物, 否则官方 `checkpoint_30`).
+   - 用 `FLIP_GOLF_Inference.yaml` (FlipModel + FlipDataset, `INCLUDE_RIGHT_HAND=true` 让左右手都参与推理).
+   - 完成出 `hand0.mp4` (右) / `hand1.mp4` (左) 各一个 60fps overlay mp4, 拖单帧 slider 看 cam0|cam1 拼接的双手 3D 投影. npy 同时落到 `<capture>/.pipeline/<seq>.npy`.
+7. **6. 3D Visualization**: 点 `Render way_vis`. 看到 3D 轨迹 mp4 (cam0 / cam1 各一个).
    - 没物体轨迹 (`<capture>/trajectory_output/trajectory.csv` 不存在) 时, step5 只输出手, step6 自动切 hand-only.
 
 ---
@@ -89,11 +117,20 @@ pipeline/
 │   ├── step0_setup.py
 │   ├── step1_undistort.py
 │   ├── step2_detect.py
+│   ├── detect_backends.py          # YOLO + SAM2 检测后端抽象 + bbox patch
+│   ├── sam2_interactive.py         # SAM2 image predictor 交互式标点
 │   ├── step3_pseudo_label.py
+│   ├── pseudo_backends.py          # HaMER + WiLoR 伪标后端抽象
 │   ├── step4_finetune.py
 │   ├── step5_inference.py
 │   └── step6_visualize.py
-├── model/                          # HE / HaMER / YOLO / rootnet
+├── model/
+│   ├── Hand_Estimation/            # USThand (FlipModel + FlipDataset)
+│   ├── hamer/                      # HaMER (Step 3 备选)
+│   ├── WiLoR/                      # WiLoR (Step 3 备选, vendored, 不嵌套 git)
+│   ├── sam2/                       # SAM2 (Step 2 备选)
+│   ├── config/                     # YOLO 配置 + yolov7 ckpt 位置
+│   └── rootnet/                    # 老的 rootnet (现在 step 5 不直接用了)
 ├── config/                         # baseball_golf.json (球杆 mesh 路径等)
 ├── utils/                          # way_vis.py 等
 ├── MANO/                           # MANO 模型文件 (license-restricted, 用户自备)
@@ -217,7 +254,10 @@ paths = [
     'model/rootnet/SAR-resnet34-Root.pth',
     'model/rootnet/SAR-convnext-root.pth',
     'model/config/checkpoints/yolov7_best.pt',
-    'model/Hand_Estimation/exp/new/checkpoints/checkpoint_30/TestMultiviewStereo.pth.tar',
+    'model/Hand_Estimation/exp/new/checkpoints/checkpoint_30/TestFlipMultiviewStereo.pth.tar',
+    'model/WiLoR/pretrained_models/wilor_final.ckpt',
+    'model/WiLoR/pretrained_models/detector.pt',
+    'model/sam2/checkpoints/sam2.1_hiera_large.pt',
     'model/Hand_Estimation/mano_data/MANO_RIGHT.pkl',
 ]
 for p in paths:
@@ -248,11 +288,13 @@ for p in paths:
 
 ## 已知限制
 
-- v1 只支持**2 个 1440×1080 彩色相机**的高尔夫采集格式.
+- 只支持**2 个 1440×1080 彩色相机**的高尔夫采集格式.
 - Step 4 (finetune) 现在 web 没流式 log, 看 stderr 要去启动 web 的终端窗口.
-- Step 3 (HaMER) 耗时长, gradio 进度条按 batch 粗粒度更新.
+- Step 3 (HaMER) 耗时长, gradio 进度条按 batch 粗粒度更新. 想快可以换 WiLoR 后端.
+- Step 2 SAM2 后端的 `propagate_in_video` 是端到端逐帧推理, 长序列 + 高分辨率慢; 已经强制 `offload_video_to_cpu=True, offload_state_to_cpu=True` 防 OOM, 但慢 15-25%.
 - Step 6 (way_vis) 通过 monkey-patch globals + `_build_view_overlay_sources` 函数调用, 不影响 CLI 兼容, 但**多用户并发会冲突** (模块全局共享). 单用户场景不影响.
 - `config/baseball_golf.json` 里的 `club_mesh_path` 是绝对路径, 迁移到新机器后要改 (或把 mesh 也搬过去).
+- USThand 切到 FlipModel 后, 内部约定为 "训练只见右手, 左手镜像后再翻回"; 老的 `TestMultiviewStereo` 权重和老的 `GolfInfraDataset` 推理 yaml **已不兼容**, 加载会 weight key 不匹配崩. FT / 推理统一走 `FLIP_GOLF_DINO.yaml` / `FLIP_GOLF_Inference.yaml`.
 
 ---
 
