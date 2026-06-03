@@ -14,7 +14,6 @@ MANO 文件因为 license 没在 HF repo 里 (除非你 upload 时启了 INCLUDE
     MANO/{MANO_LEFT,MANO_RIGHT,MANO_PART,v_color}.pkl
     model/Hand_Estimation/mano_data/MANO_RIGHT.pkl
     model/Hand_Estimation/mano/models/{MANO_LEFT,MANO_RIGHT}.pkl
-    model/hamer/_DATA/data/mano/{MANO_LEFT,MANO_RIGHT}.pkl
 """
 
 from __future__ import annotations
@@ -39,28 +38,9 @@ ITEMS: list[tuple[str, str]] = [
      "model/Hand_Estimation/dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth"),
     ("Hand_Estimation/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth",
      "model/Hand_Estimation/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth"),
-    # rootnet
-    ("rootnet/SAR-convnext-root.pth",
-     "model/rootnet/SAR-convnext-root.pth"),
-    ("rootnet/SAR-resnet34-Root.pth",
-     "model/rootnet/SAR-resnet34-Root.pth"),
-    # yolov7
-    ("config/checkpoints/yolov7_best.pt",
-     "model/config/checkpoints/yolov7_best.pt"),
-    # HaMER
-    ("hamer/_DATA/hamer_ckpts/checkpoints/hamer.ckpt",
-     "model/hamer/_DATA/hamer_ckpts/checkpoints/hamer.ckpt"),
-    ("hamer/_DATA/hamer_ckpts/dataset_config.yaml",
-     "model/hamer/_DATA/hamer_ckpts/dataset_config.yaml"),
-    ("hamer/_DATA/hamer_ckpts/model_config.yaml",
-     "model/hamer/_DATA/hamer_ckpts/model_config.yaml"),
-    ("hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx",
-     "model/hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx"),
-    ("hamer/_DATA/data/mano_mean_params.npz",
-     "model/hamer/_DATA/data/mano_mean_params.npz"),
     ("Hand_Estimation/mano_data/mano_mean_params.npz",
      "model/Hand_Estimation/mano_data/mano_mean_params.npz"),
-    # WiLoR (原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
+    # WiLoR (Step 3 伪标; 原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
     ("WiLoR/detector.pt",
      "model/WiLoR/pretrained_models/detector.pt"),
     ("WiLoR/wilor_final.ckpt",
@@ -70,15 +50,6 @@ ITEMS: list[tuple[str, str]] = [
      "model/WiLoR/mano_data/mano_mean_params.npz"),
     ("WiLoR/mano_data/MANO_RIGHT.pkl",
      "model/WiLoR/mano_data/MANO_RIGHT.pkl"),
-    # SAM2 4 个 size (pipeline 默认 large, 其他备选)
-    ("sam2/checkpoints/sam2.1_hiera_tiny.pt",
-     "model/sam2/checkpoints/sam2.1_hiera_tiny.pt"),
-    ("sam2/checkpoints/sam2.1_hiera_small.pt",
-     "model/sam2/checkpoints/sam2.1_hiera_small.pt"),
-    ("sam2/checkpoints/sam2.1_hiera_base_plus.pt",
-     "model/sam2/checkpoints/sam2.1_hiera_base_plus.pt"),
-    ("sam2/checkpoints/sam2.1_hiera_large.pt",
-     "model/sam2/checkpoints/sam2.1_hiera_large.pt"),
 ]
 
 # 如果你上传时启了 INCLUDE_MANO, 加 --with-mano 也会拉这些
@@ -87,10 +58,6 @@ MANO_ITEMS: list[tuple[str, str]] = [
     ("MANO/MANO_RIGHT.pkl",  "MANO/MANO_RIGHT.pkl"),
     ("MANO/MANO_PART.pkl",   "MANO/MANO_PART.pkl"),
     ("MANO/v_color.pkl",     "MANO/v_color.pkl"),
-    ("hamer/_DATA/data/mano/MANO_LEFT.pkl",
-     "model/hamer/_DATA/data/mano/MANO_LEFT.pkl"),
-    ("hamer/_DATA/data/mano/MANO_RIGHT.pkl",
-     "model/hamer/_DATA/data/mano/MANO_RIGHT.pkl"),
     ("Hand_Estimation/mano_data/MANO_RIGHT.pkl",
      "model/Hand_Estimation/mano_data/MANO_RIGHT.pkl"),
     ("Hand_Estimation/mano/models/MANO_LEFT.pkl",

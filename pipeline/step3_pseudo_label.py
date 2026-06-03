@@ -1,12 +1,9 @@
-"""Step 3: 用 step2 的 bbox 喂伪标后端 (HaMER / WiLoR) 拿 21 个 2D 关节, 写 npz.
+"""Step 3: 用 step2 的 bbox 喂 WiLoR 拿 21 个 2D 关节, 写 npz.
 
 输入: workspace/detections.json + 去畸变图.
 输出: ``.undistorted/pseudo_label_wilor/<seq>_<cam>_<frame>_<hand>.npz``
        字段: is_right (1,), joints_2d (21, 2)
 末尾: 调 make_pseudo_video 出全帧拼接 mp4 + jpg.
-
-后端通过 ``backend`` 参数二选一, 共用 pseudo_backends.make_backend, 输出 npz
-格式不随后端变. 默认 ``hamer`` 保持向后兼容.
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ def _load_newK_from_yaml(yaml_path: Path) -> np.ndarray:
 
 def run(ws: Workspace, progress: Optional[Callable[[float, str], None]] = None,
         force: bool = False, make_video: bool = True,
-        backend: str = "hamer") -> Dict[str, Any]:
+        backend: str = "wilor") -> Dict[str, Any]:
     if backend not in VALID_BACKENDS:
         raise ValueError(f"backend 必须是 {VALID_BACKENDS} 之一, 收到 {backend!r}")
 

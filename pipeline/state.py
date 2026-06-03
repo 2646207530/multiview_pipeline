@@ -11,7 +11,6 @@ state schema (写到 state.json):
      "undistort": {"status": "done",    "ts": "...", "outputs": {"undist_root": "...", "n_cams": 2}},
      "detect":    {"status": "running", "ts": "...", "outputs": {...}},
      "pseudo":    {"status": "pending"},
-     "finetune":  {"status": "skipped"},
      "infer":     {"status": "pending"},
      "vis":       {"status": "pending"},
   }
@@ -34,7 +33,6 @@ STEP_NAMES = [
     "undistort",
     "detect",
     "pseudo",
-    "finetune",
     "infer",
     "vis",
 ]
@@ -45,8 +43,7 @@ STEP_DEPS: Dict[str, list[str]] = {
     "undistort": ["setup"],
     "detect":    ["undistort"],
     "pseudo":    ["detect"],
-    "finetune":  ["pseudo"],
-    "infer":     ["pseudo"],   # finetune 是 optional, infer 只依赖 pseudo
+    "infer":     ["pseudo"],
     "vis":       ["infer"],
 }
 

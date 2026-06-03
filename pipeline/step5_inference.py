@@ -3,7 +3,7 @@
 2 个子步:
   1. ``run_hand_estimation_subprocess`` 跑 visualize_mano.py, 出
      ``_he_output/<seq>_mano.json`` + 每帧 jpg + hand0/hand1 mp4.
-     (如果 step4 finetune 跑过, 用 finetune 后的 ckpt; 否则用默认 checkpoint_30)
+     (默认用 exp/new/checkpoints/checkpoint_30, 也可通过 ckpt_override 指定)
   2. ``parse_mano_json_to_arrays`` 把 JSON 转 8 个数组, 跟 object 位姿 + 相机
      参数一起组装成 npy.
 
@@ -26,17 +26,34 @@ from multiview_hand_init import (  # type: ignore
     run_hand_estimation_subprocess,
     parse_mano_json_to_arrays,
 )
-from run_golf_capture_to_npy import (  # type: ignore
+from utils.camera_npy import (  # type: ignore
     _load_camera_params,
     _resolve_color_cams,
     _load_trajectory,
     _object_poses_to_world,
     _build_camera_block,
 )
-from run_hamer_to_npy import _slerp_interpolate_nan, _interpolate_nan  # type: ignore
+from utils.nan_interp import _slerp_interpolate_nan, _interpolate_nan  # type: ignore
 
 from .state import PipelineState
 from .workspace import Workspace
+
+
+def _release_gpu_memory_before_subprocess():
+    """子进程跟 app.py 共享物理 GPU; 先把 app.py 这边 torch CUDA cache 清掉,
+    否则子进程 init NCCL/barrier 就 OOM."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[step5] empty_cache failed (ignored): {e}")
 
 
 def run(ws: Workspace, gpu_id: str = "0",
@@ -58,17 +75,10 @@ def run(ws: Workspace, gpu_id: str = "0",
             raise FileNotFoundError(f"指定的 ckpt 目录不存在: {ckpt_path}")
         print(f"[step5] 用用户指定 ckpt: {ckpt_path}")
     else:
-        ft_step = state.steps.get("finetune")
         ckpt_path = None
-        if ft_step and ft_step.status == "done":
-            ckpt_path = Path(ft_step.outputs["finetuned_ckpt"])
-            print(f"[step5] 默认: finetune 后的 ckpt: {ckpt_path}")
-        else:
-            print(f"[step5] 默认: exp/new/checkpoints/checkpoint_30")
+        print(f"[step5] 默认: exp/new/checkpoints/checkpoint_30")
 
-    # 释放 app.py 进程里可能还挂着的模型 (SAM2 / 任何残留) +
     # 清 CUDA cache, 把整张物理 GPU 让给 inference 子进程.
-    from .step4_finetune import _release_gpu_memory_before_subprocess
     _release_gpu_memory_before_subprocess()
 
     # ── 1) 跑 HE 子进程, 出 mano.json + hand0/hand1.mp4 ────────────────

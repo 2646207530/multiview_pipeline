@@ -18,7 +18,7 @@ _PROJECT = Path(__file__).resolve().parent.parent
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-from run_golf_capture_to_npy import (  # type: ignore
+from utils.camera_npy import (  # type: ignore
     _load_camera_params,
     _resolve_color_cams,
     _frame_dir_for,

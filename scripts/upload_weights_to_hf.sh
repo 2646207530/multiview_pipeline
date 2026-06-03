@@ -24,30 +24,13 @@ declare -a ITEMS=(
   # DINOv3 (公开)
   "Hand_Estimation/dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth:model/Hand_Estimation/dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth"
   "Hand_Estimation/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth:model/Hand_Estimation/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth"
-  # rootnet (师兄)
-  "rootnet/SAR-convnext-root.pth:model/rootnet/SAR-convnext-root.pth"
-  "rootnet/SAR-resnet34-Root.pth:model/rootnet/SAR-resnet34-Root.pth"
-  # yolov7 (师兄 fine-tune)
-  "config/checkpoints/yolov7_best.pt:model/config/checkpoints/yolov7_best.pt"
-  # HaMER (官方)
-  "hamer/_DATA/hamer_ckpts/checkpoints/hamer.ckpt:model/hamer/_DATA/hamer_ckpts/checkpoints/hamer.ckpt"
-  "hamer/_DATA/hamer_ckpts/dataset_config.yaml:model/hamer/_DATA/hamer_ckpts/dataset_config.yaml"
-  "hamer/_DATA/hamer_ckpts/model_config.yaml:model/hamer/_DATA/hamer_ckpts/model_config.yaml"
-  "hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx:model/hamer/_DATA/hamer_ckpts/onnx/hamer_inferpy.onnx"
-  "hamer/_DATA/data/mano_mean_params.npz:model/hamer/_DATA/data/mano_mean_params.npz"
   "Hand_Estimation/mano_data/mano_mean_params.npz:model/Hand_Estimation/mano_data/mano_mean_params.npz"
-  # WiLoR (原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
+  # WiLoR (Step 3 伪标; 原始源: huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/*)
   "WiLoR/detector.pt:model/WiLoR/pretrained_models/detector.pt"
   "WiLoR/wilor_final.ckpt:model/WiLoR/pretrained_models/wilor_final.ckpt"
   # WiLoR mano_data (MANO_RIGHT.pkl 受 license 约束, 按用户要求统一上传; 请确保 HF repo private)
   "WiLoR/mano_data/mano_mean_params.npz:model/WiLoR/mano_data/mano_mean_params.npz"
   "WiLoR/mano_data/MANO_RIGHT.pkl:model/WiLoR/mano_data/MANO_RIGHT.pkl"
-  # SAM2 (官方权重, 一共 4 个 size; pipeline 默认用 large, 其他备选).
-  # 总计 ~1.5GB. 不想全传可以注释掉 tiny/small/base_plus.
-  "sam2/checkpoints/sam2.1_hiera_tiny.pt:model/sam2/checkpoints/sam2.1_hiera_tiny.pt"
-  "sam2/checkpoints/sam2.1_hiera_small.pt:model/sam2/checkpoints/sam2.1_hiera_small.pt"
-  "sam2/checkpoints/sam2.1_hiera_base_plus.pt:model/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
-  "sam2/checkpoints/sam2.1_hiera_large.pt:model/sam2/checkpoints/sam2.1_hiera_large.pt"
 )
 
 # MANO (license restricted) — 只在 INCLUDE_MANO=1 时加入
@@ -59,8 +42,6 @@ if [[ "$INCLUDE_MANO" == "1" ]]; then
     "MANO/MANO_RIGHT.pkl:MANO/MANO_RIGHT.pkl"
     "MANO/MANO_PART.pkl:MANO/MANO_PART.pkl"
     "MANO/v_color.pkl:MANO/v_color.pkl"
-    "hamer/_DATA/data/mano/MANO_LEFT.pkl:model/hamer/_DATA/data/mano/MANO_LEFT.pkl"
-    "hamer/_DATA/data/mano/MANO_RIGHT.pkl:model/hamer/_DATA/data/mano/MANO_RIGHT.pkl"
     "Hand_Estimation/mano_data/MANO_RIGHT.pkl:model/Hand_Estimation/mano_data/MANO_RIGHT.pkl"
     "Hand_Estimation/mano/models/MANO_LEFT.pkl:model/Hand_Estimation/mano/models/MANO_LEFT.pkl"
     "Hand_Estimation/mano/models/MANO_RIGHT.pkl:model/Hand_Estimation/mano/models/MANO_RIGHT.pkl"

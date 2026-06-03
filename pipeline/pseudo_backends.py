@@ -1,8 +1,7 @@
-"""伪标 2D 关节后端: HaMER / WiLoR 共用同一个接口.
+"""伪标 2D 关节后端: WiLoR.
 
 接口: backend.estimate_2d(image_bgr, hand_label, bbox_xyxy, K) -> np.ndarray (21, 2)
 返回真实相机内参 K 下的 21 个 2D 关节 (full image 坐标), 或 None 表示失败.
-两个后端的 npz 输出格式完全一致, 上游 step3 无需感知具体后端.
 """
 from __future__ import annotations
 
@@ -92,29 +91,6 @@ class PseudoBackend:
             pass
 
 
-class _HamerBackend(PseudoBackend):
-    name = "hamer"
-
-    def __init__(self):
-        from model.hamer.infer import hamer_inference  # type: ignore
-        from model.config.hamer_config import hamer_opt  # type: ignore
-        self.hamer = hamer_inference(hamer_opt)
-
-    def estimate_2d(self, image, hand_label, bbox, K):
-        try:
-            out, _ = self.hamer.estimate_from_rgb(image, [[hand_label, bbox]], K)
-        except Exception as e:
-            print(f"[hamer] estimate_from_rgb fail: {e}")
-            return None
-        kp2d = out.get("pred_keypoints_2d_full")
-        if kp2d is None:
-            return None
-        kp2d = kp2d.detach().cpu().numpy().squeeze().astype(np.float32)
-        if kp2d.ndim != 2 or kp2d.shape[1] != 2:
-            return None
-        return kp2d
-
-
 class _WilorBackend(PseudoBackend):
     name = "wilor"
 
@@ -196,12 +172,12 @@ class _WilorBackend(PseudoBackend):
                                is_right, K)
 
 
-_REGISTRY = {"hamer": _HamerBackend, "wilor": _WilorBackend}
+_REGISTRY = {"wilor": _WilorBackend}
 VALID_BACKENDS = tuple(_REGISTRY.keys())
 
 
 def make_backend(name: str) -> PseudoBackend:
-    key = (name or "hamer").lower()
+    key = (name or "wilor").lower()
     if key not in _REGISTRY:
         raise ValueError(
             f"Unknown pseudo backend: {name!r} (valid: {list(_REGISTRY)})"

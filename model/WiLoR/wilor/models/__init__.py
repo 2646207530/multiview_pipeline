@@ -32,5 +32,12 @@ def load_wilor(checkpoint_path, cfg_path):
         model_cfg.MANO.MEAN_PARAMS = './mano_data/mano_mean_params.npz'
         model_cfg.freeze()
 
-    model = WiLoR.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg)
+    # map_location='cpu': ckpt 序列化时记录了 save 用的 device (师兄是 cuda:3),
+    # 不指定就 Lightning 默认按 ckpt 设备加载, 当前进程不一定有那张卡; 让上层
+    # ``.to(self.device)`` 来决定真实 device.
+    import torch as _torch
+    model = WiLoR.load_from_checkpoint(
+        checkpoint_path, strict=False, cfg=model_cfg,
+        map_location=_torch.device("cpu"),
+    )
     return model, model_cfg

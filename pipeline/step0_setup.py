@@ -20,8 +20,8 @@ _PROJECT = Path(__file__).resolve().parent.parent
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-# 复用 run_golf_capture_to_npy 里现成的函数
-from run_golf_capture_to_npy import (  # type: ignore
+# 复用 utils/camera_npy.py 里现成的相机辅助函数
+from utils.camera_npy import (  # type: ignore
     _load_camera_params,
     _resolve_color_cams,
     _frame_dir_for,

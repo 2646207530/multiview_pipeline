@@ -43,7 +43,6 @@ from tqdm import tqdm
 _PROJECT = Path(__file__).resolve().parent
 _HE_REL = Path("model") / "Hand_Estimation"
 _HE_CFG_REL = "config/release/FLIP_GOLF_Inference.yaml"  # FlipModel 推理 cfg
-_HE_FT_TEMPLATE_REL = "config/release/FLIP_GOLF_DINO.yaml"   # 用作 self-supervised FT 的模板 (FlipModel 版本)
 _HE_CKPT_REL = "exp/new/checkpoints/checkpoint_30"
 
 
@@ -630,153 +629,6 @@ def run_hand_estimation_subprocess(project_root: Path, undist_root: Path,
     return cands[0]
 
 
-# ----------------------------- self-supervised finetune (训练) ----
-def run_hand_estimation_finetune_subprocess(project_root: Path, undist_root: Path,
-                                            capture_id: str,
-                                            epochs: int,
-                                            gpu_id: str = "0",
-                                            lr: float = 1e-5,
-                                            batch_size: int = 1,
-                                            pretrained_ckpt_rel: str = _HE_CKPT_REL,
-                                            extra_env: Optional[dict] = None) -> Path:
-    """对当前 capture 在线 self-supervised 微调 Hand_Estimation 权重, 返回新
-    checkpoint 目录的绝对路径 (含 ``<ModelClass>.pth.tar`` 等文件, 供 inference
-    时通过软链当作 ``checkpoints/`` 使用)。
-
-    流程:
-      1. 复制 WORK_GOLF_DINO.yaml 作为模板, 把
-         DATASET.TRAIN.DATA_ROOT / DATASET.TEST.DATA_ROOT 改成我们的
-         ``<undist_root>``, EPOCH / LR / BATCH_SIZE 改成 finetune 友好值,
-         AUG 关掉. 写到 ``<undist_root>/_ft_cfg.yaml``.
-      2. 调 ``train_ddp_sf.py --cfg <ft yaml> --ft --reload <pretrained_dir>
-         --exp_id mv_ft_<seq> --gpu_id <gpu> -b <bs> -w 0``
-      3. 训练结束扫 ``exp/mv_ft_<seq>/checkpoints/`` 找最新 checkpoint 目录,
-         返回它的绝对路径.
-    """
-    he_dir = project_root / _HE_REL
-    if not he_dir.is_dir():
-        raise RuntimeError(f"Hand_Estimation 目录不存在: {he_dir}")
-    template_path = he_dir / _HE_FT_TEMPLATE_REL
-    if not template_path.is_file():
-        raise RuntimeError(f"FT 模板 yaml 不存在: {template_path}")
-    pretrained_path = (he_dir / pretrained_ckpt_rel).resolve()
-    if not pretrained_path.is_dir():
-        raise RuntimeError(f"预训练 ckpt 目录不存在: {pretrained_path}")
-
-    # ── 1) 生成 finetune YAML ────────────────────────────────────────
-    with open(template_path) as f:
-        ft_cfg = yaml.safe_load(f)
-    undist_root_abs = str(Path(undist_root).resolve())
-    for split in ("TRAIN", "TEST"):
-        if "DATASET" not in ft_cfg or split not in ft_cfg["DATASET"]:
-            raise RuntimeError(f"FT 模板里缺 DATASET.{split} 段")
-        ft_cfg["DATASET"][split]["DATA_ROOT"] = undist_root_abs
-    # finetune 调小学习率 / 少跑几个 epoch / 单 batch / 关 AUG
-    ft_cfg.setdefault("TRAIN", {})["EPOCH"] = int(epochs)
-    ft_cfg["TRAIN"]["LR"] = float(lr)
-    ft_cfg["TRAIN"]["BATCH_SIZE"] = int(batch_size)
-    ft_cfg["TRAIN"]["SAVE_EPOCH"] = [int(epochs) - 1] if epochs > 0 else [0]
-    # 关 augmentation 让 self-supervised 信号更"干净" (尽量贴近测试分布)
-    for split in ("TRAIN", "TEST"):
-        tf = ft_cfg.get("DATASET", {}).get(split, {}).get("TRANSFORM")
-        if isinstance(tf, dict):
-            tf["AUG"] = False
-            tf["OCCLUSION"] = False
-            tf["OCCLUSION_PROB"] = 0.0
-
-    # ── FLIP_GOLF_DINO.yaml 里 MANO.MODEL_PATH / MEAN_PARAMS / DATA_DIR
-    # 是师兄机器上的硬编码 (/home/cyc/UST-Hand/mano_data 之类).
-    # 这里递归把所有 MANO 子节点的路径换成相对路径 'mano_data',
-    # 子进程会以 cwd=he_dir (Hand_Estimation/) 启动, 相对路径会落到
-    # he_dir/mano_data/, 正好就是 pipeline 自己的 MANO 目录.
-    def _patch_mano_paths(node):
-        if not isinstance(node, dict):
-            return
-        for k, v in node.items():
-            if k == "MANO" and isinstance(v, dict):
-                if "MODEL_PATH" in v:
-                    v["MODEL_PATH"] = "mano_data"
-                if "DATA_DIR" in v:
-                    v["DATA_DIR"] = "mano_data"
-                if "MEAN_PARAMS" in v:
-                    v["MEAN_PARAMS"] = "mano_data/" + os.path.basename(v["MEAN_PARAMS"])
-            elif isinstance(v, dict):
-                _patch_mano_paths(v)
-    _patch_mano_paths(ft_cfg)
-
-    ft_yaml_path = Path(undist_root) / "_ft_cfg.yaml"
-    with open(ft_yaml_path, "w") as f:
-        yaml.safe_dump(ft_cfg, f, sort_keys=False)
-    print(f"[mvinit] 已写 FT yaml: {ft_yaml_path}")
-
-    # ── 2) 调 train_ddp_sf.py ────────────────────────────────────────
-    exp_id = f"mv_ft_{capture_id}"
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
-    # 物理 GPU 选择走 CUDA_VISIBLE_DEVICES; 父进程已设过就尊重.
-    env.setdefault("CUDA_VISIBLE_DEVICES", gpu_id)
-    # subprocess 内部用相对索引 0 (CUDA_VISIBLE_DEVICES 限定后只剩一张).
-    cli_gpu_id = "0"
-    _prepend_conda_lib_to_ld_path(env)
-    cmd = [
-        sys.executable, "train_ddp_sf.py",
-        "--cfg", str(ft_yaml_path),
-        "--ft",                             # 启用 ft 分支
-        "--reload", str(pretrained_path),   # 经过我们 patch, 指向预训练 ckpt 目录
-        "--exp_id", exp_id,
-        "--gpu_id", cli_gpu_id,
-        "-b", str(batch_size),
-        "-w", "0",
-    ]
-    print(f"[mvinit] 调 Hand_Estimation 自监督 FT (CUDA_VISIBLE_DEVICES="
-          f"{env.get('CUDA_VISIBLE_DEVICES', '<unset>')}): cd {he_dir} && {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=str(he_dir), check=True, env=env)
-
-    # ── 3) 定位最新的 checkpoint 目录 ────────────────────────────────
-    # Recorder.dump_path = f"{exp_id}_{timestamp}", 所以实际目录是
-    #   exp/<exp_id>_<YYYY_MMDD_HHMM_SS>/checkpoints/...
-    # 不是直接的 exp/<exp_id>/checkpoints/. 用 glob 模式找带时间戳的目录,
-    # 取 mtime 最新的那一个.
-    exp_root = he_dir / "exp"
-    candidate_exp_dirs = sorted(
-        [p for p in exp_root.glob(f"{exp_id}_*") if (p / "checkpoints").is_dir()],
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
-    # 兼容: 旧式可能直接是 exp/<exp_id>/checkpoints/ (无时间戳)
-    legacy_root = exp_root / exp_id
-    if (legacy_root / "checkpoints").is_dir():
-        candidate_exp_dirs.append(legacy_root)
-    if not candidate_exp_dirs:
-        raise RuntimeError(
-            f"未找到 FT 实验目录: 搜索 {exp_root}/{exp_id}_* 和 {exp_root}/{exp_id}"
-        )
-    chosen_exp_dir = candidate_exp_dirs[0]
-    ckpts_root = chosen_exp_dir / "checkpoints"
-    print(f"[mvinit] FT 输出实验目录: {chosen_exp_dir}")
-
-    cand_dirs = [p for p in ckpts_root.iterdir() if p.is_dir()]
-    if not cand_dirs:
-        raise RuntimeError(f"{ckpts_root} 下无检查点子目录, FT 失败?")
-    cand_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    new_ckpt = cand_dirs[0].resolve()
-    # 校验里面至少有一个 *.pth.tar (跟 MODEL.TYPE 同名, 比如
-    # TestMultiviewStereo.pth.tar / TestFlipMultiviewStereo.pth.tar).
-    # 不写死类名, 适配后续切换不同 model 的情况.
-    def _has_pthtar(d: Path) -> bool:
-        return any(d.glob("*.pth.tar"))
-    if not _has_pthtar(new_ckpt):
-        for cd in cand_dirs[1:]:
-            if _has_pthtar(cd):
-                new_ckpt = cd.resolve()
-                break
-        else:
-            raise RuntimeError(f"FT 输出目录里没有 *.pth.tar: "
-                               f"{[str(p) for p in cand_dirs]}")
-    print(f"[mvinit] FT 完成, 新 checkpoint: {new_ckpt}")
-    return new_ckpt
-
-
 # ----------------------------------------- merge HE output back into root ---
 NAN3   = np.full((3,),  np.nan, dtype=np.float32)
 NAN10  = np.full((10,), np.nan, dtype=np.float32)
@@ -965,10 +817,7 @@ def init_hands_from_multiview(*, project_root: Path, capture_dir: Path,
                               force_pseudo: bool = False,
                               pseudo_video: bool = True,
                               pseudo_video_fps: int = 60,
-                              pseudo_video_downscale: int = 2,
-                              mv_finetune_epochs: int = 0,
-                              mv_finetune_lr: float = 1e-5,
-                              mv_finetune_bs: int = 1):
+                              pseudo_video_downscale: int = 2):
     """
     Orchestrator. cam_names_in_order[0] 必须是 hamer_cam (= world frame)。
     返回 (r_rot_arr, r_pose_arr, r_shape_arr, r_trans_arr,
@@ -1013,20 +862,7 @@ def init_hands_from_multiview(*, project_root: Path, capture_dir: Path,
         except Exception as e:
             print(f"[mvinit] 生成伪标视频失败 (不影响后续流程): {e}")
 
-    # 3) (可选) 自监督微调 Hand_Estimation 权重
-    finetuned_ckpt: Optional[Path] = None
-    if mv_finetune_epochs and mv_finetune_epochs > 0:
-        try:
-            finetuned_ckpt = run_hand_estimation_finetune_subprocess(
-                project_root, undist_root, capture_id,
-                epochs=mv_finetune_epochs,
-                gpu_id=gpu_id, lr=mv_finetune_lr, batch_size=mv_finetune_bs,
-            )
-        except Exception as e:
-            print(f"[mvinit] 自监督微调失败 ({e}), 回退用原始权重")
-            finetuned_ckpt = None
-
-    # 4) Hand_Estimation 推理 (用原始权重或微调后权重)
+    # 3) Hand_Estimation 推理 (默认权重)
     he_output_dir = undist_root / "_he_output"
     if he_output_dir.is_dir():
         # 清掉上次的 *_mano.json, 避免拿到旧结果
@@ -1034,7 +870,6 @@ def init_hands_from_multiview(*, project_root: Path, capture_dir: Path,
             p.unlink()
     json_path = run_hand_estimation_subprocess(
         project_root, undist_root, he_output_dir, gpu_id=gpu_id,
-        ckpt_override=finetuned_ckpt,
     )
     print(f"[mvinit] Hand_Estimation 输出: {json_path}")
 

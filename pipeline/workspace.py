@@ -61,13 +61,6 @@ class Workspace:
     def pseudo_overlay_mp4(self) -> Path:
         return self.pseudo_vis_dir / f"{self.seq_name}_pseudo_overlay.mp4"
 
-    # ── step 4 (finetune) ──
-    @property
-    def finetune_dir(self) -> Path:
-        # subprocess 跑 train_ddp_sf.py 时会创建 exp/mv_ft_<seq>_<timestamp>/
-        # 这里只保留预期位置, 真实 ckpt 路径由 subprocess 返回后写到 state
-        return self.root / "_finetune"
-
     # ── step 5 (multi-view inference + npy assembly) ──
     @property
     def he_output_dir(self) -> Path:
@@ -94,5 +87,5 @@ class Workspace:
 
     # ── 工具 ──
     def ensure_dirs(self) -> None:
-        for p in [self.root, self.detect_vis_dir, self.finetune_dir, self.vis_dir]:
+        for p in [self.root, self.detect_vis_dir, self.vis_dir]:
             p.mkdir(parents=True, exist_ok=True)
