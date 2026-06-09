@@ -4,10 +4,8 @@
   1. ``run_hand_estimation_subprocess`` 跑 visualize_mano.py, 出
      ``_he_output/<seq>_mano.json`` + 每帧 jpg + hand0/hand1 mp4.
      (默认用 exp/new/checkpoints/checkpoint_30, 也可通过 ckpt_override 指定)
-  2. ``parse_mano_json_to_arrays`` 把 JSON 转 8 个数组, 跟 object 位姿 + 相机
-     参数一起组装成 npy.
-
-(SportGS 优化不在 v1 范围.)
+  2. ``parse_mano_json_to_arrays`` 把 JSON 转 8 个数组, 跟相机参数一起组装成 npy.
+     (只输出手, 不带 object 字段.)
 """
 
 from __future__ import annotations
@@ -29,8 +27,6 @@ from multiview_hand_init import (  # type: ignore
 from utils.camera_npy import (  # type: ignore
     _load_camera_params,
     _resolve_color_cams,
-    _load_trajectory,
-    _object_poses_to_world,
     _build_camera_block,
 )
 from utils.nan_interp import _slerp_interpolate_nan, _interpolate_nan  # type: ignore
@@ -109,22 +105,8 @@ def run(ws: Workspace, gpu_id: str = "0",
     else:
         total_frames_img = int(npc[0])
 
-    # 物体轨迹是可选的 (没有 csv 就只存手, 不带 object 字段)
-    traj_csv = cap / "trajectory_output" / "trajectory.csv"
-    obj_rot_arr = None
-    obj_trans_arr = None
-    if traj_csv.exists():
-        ref_cam_name, poses = _load_trajectory(traj_csv)
-        if ref_cam_name not in cams:
-            raise RuntimeError(f"reference_camera {ref_cam_name} 不在 camera_params.json 中")
-        obj_rot_arr, obj_trans_arr = _object_poses_to_world(
-            poses, cams, ref_cam_name, hamer_name)
-        total_frames = min(obj_rot_arr.shape[0], total_frames_img)
-        obj_rot_arr   = obj_rot_arr[:total_frames]
-        obj_trans_arr = obj_trans_arr[:total_frames]
-    else:
-        print(f"[step5] 未找到 {traj_csv}, 跳过物体轨迹 (只输出手)")
-        total_frames = total_frames_img
+    # 只输出手, 不带 object 字段 (物体轨迹逻辑已移除)
+    total_frames = total_frames_img
 
     # parse JSON -> 8 个数组 (按 total_frames 长度, 缺帧 NaN)
     (r_rot, r_pose, r_shape, r_trans,
@@ -155,8 +137,6 @@ def run(ws: Workspace, gpu_id: str = "0",
                        "trans_l": l_trans, "shape_l": l_shape},
         "camera":     camera,
     }
-    if obj_rot_arr is not None:
-        params["object"] = {"obj_rot": obj_rot_arr, "obj_trans": obj_trans_arr}
     root = {
         "imgnames":  imgnames,
         "imgpath":   str(hamer_undist_dir),

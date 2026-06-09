@@ -19,11 +19,12 @@ Gradio web 界面包装的多视角高尔夫手部估计 pipeline: 用户选完 
 
 > Step 2 (vitpose) 依赖上游 preprocess 产出的 `<capture>/.undistorted/<seq>/preprocess/<cam>/vitpose.pt` (COCO17 关节). 这一步在跑本 pipeline 之前由 human-dataset-tools / multi_view_smpl_optimizer 的 vitpose stage 产生.
 
+> <capture>/.undistorted/<seq>文件夹为去畸变图像及标定目录，已整理为human-dataset-tools所需数据目录形式，直接作为根目录跑人体姿态结果即可
+
 ### 不在标准 pipeline 里的 mega-stage / 外挂
 
 下面这些**不属于** 0~5 的标准链路, 用到时单独触发, 不在 web wizard 主路径里:
 
-- **SportGS 接触优化** — 老 `golf-hand-object` 仓库里的 stage, 在 npy 之外做物体-手接触约束. 当前 pipeline **不包含**, 想用要切到原仓库.
 - **way_vis 单视角导出 / 自定义 club mesh** — 都还在 Step 5, 但 club mesh 路径写死在 `config/baseball_golf.json`, 想换 mesh 手动改 json.
 
 ---
