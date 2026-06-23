@@ -72,15 +72,26 @@ python single_ik.py --club_traj ... --smplx_world ... --grasp ... --out ... \
 <seq>/trajectory_output/overlay_*.mp4                          # 球杆追踪 overlay
 ```
 
-## 外部依赖（不在本项目内, 按现有路径调用）
+## 模型 / 数据需另行获取（不在本仓库里）
+
+下列内容因 **license 限制 / 体积大** 不随仓库提交，clone 后需自己补齐：
+
+| 放到 | 内容 | 来源 |
+|---|---|---|
+| `MANO/` | `MANO_LEFT.pkl`、`MANO_RIGHT.pkl` 等 | MPI 官网 https://mano.is.tue.mpg.de 注册下载（license-restricted）|
+| `assets/body_models/smplx/SMPLX_NEUTRAL.npz` | SMPLX 中性模型 | SMPL-X 官网 https://smpl-x.is.tue.mpg.de 注册下载 |
+| 预定义握杆 `standard_pose/` | `<型号>_canonical_grasp.npy` | `git clone git@gitlab.addx.ai:ALGO/hcwm/standardpose.git` |
+| 球杆 mesh + aruco rig `club-assets/<型号>/` | `*.stl` + `aruco_tags*.json` | 球杆资产仓库 |
+
+- **SMPLX**：把模型放到 `assets/body_models/`（代码优先在此找；找不到会自动回退搜同级 `../pipeline/assets/body_models`）。
+- **预定义握杆 / club-assets** 的查找路径写死在 `pipeline/club_grasp_ik.py` 顶部
+  （`_STANDARD_POSE_DIR` / `_CLUB_ASSETS_DIR`），换位置改这两行。
+- 预定义握杆由 `standardpose` 仓库的 `scripts/standard_pose_bind.py` 生成。
+
+## 外部依赖（独立项目, 按路径调用）
 
 - **GVHMR 人体姿态**: `/data2/fubingshuai/golf/human-dataset-tools`（gvhmr conda 环境）。
 - **球杆追踪**: `/data2/fubingshuai/golf/omni-club-tracking`（已编译的 `cmake-build-Release/club_tracker`）。
-- **预定义握杆**: `/data2/fubingshuai/golf/standard_pose/<型号>_canonical_grasp.npy`
-  （由 `pipeline_release/scripts/standard_pose_bind.py` 生成）。
-- **球杆 mesh + aruco rig**: `/data2/fubingshuai/golf/data/club-assets/<型号>/`。
-- **SMPLX 模型**: `assets/body_models` → 软链到 `../pipeline/assets/body_models`。
-- **MANO 模型**: 本项目自带 `MANO/`。
 - conda 环境: `golf_pipeline`（去畸变/IK/渲染）、`gvhmr`（人体姿态）。路径写死在 `run_batch.sh` 顶部, 换机器改那几行。
 
 ## 结构
@@ -97,6 +108,7 @@ pipeline_ik/
 │   ├── raw_extract.py / raw_to_images.py / workspace.py / state.py
 ├── utils/{camera_npy.py, body_vis.py}   # 相机块 / overlay 渲染
 ├── scripts/{run_stage.py, gen_club_config.py, render_world_body.py}
-├── assets/body_models -> ../pipeline/assets/body_models   # SMPLX (软链)
-└── MANO/                                                  # MANO 模型
+├── single_ik.py             # 单序列 IK (给4个绝对路径; --calib 出可视化)
+├── assets/body_models/      # SMPLX 模型放这里 (另行获取, 不在仓库; 缺则回退搜 ../pipeline/assets)
+└── MANO/                    # MANO 模型放这里 (另行获取, license-restricted, 不在仓库)
 ```
