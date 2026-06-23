@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+MANO/
+assets/body_models
